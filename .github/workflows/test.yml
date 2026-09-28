@@ -1,5 +1,7 @@
 on: [push, pull_request]
 name: Unittests
+permissions:
+  contents: read
 jobs:
   test:
     strategy:
@@ -8,11 +10,11 @@ jobs:
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
       - name: Install Go
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
-      - name: Checkout code
-        uses: actions/checkout@v7
-      - name: Test
-        run: go test ./...
+      - name: Test (with the race detector)
+        run: go test -race ./...

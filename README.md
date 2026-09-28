@@ -1,14 +1,71 @@
-# go-template-repository
-![Unittest status badge](https://github.com/hochfrequenz/go-template-repository/workflows/Unittests/badge.svg)
-![Coverage status badge](https://github.com/hochfrequenz/go-template-repository/workflows/coverage/badge.svg)
-![Linter status badge](https://github.com/hochfrequenz/go-template-repository/workflows/golangci-lint/badge.svg)
+# BTPinGo 🐧
 
-This is a template repository for Go packages.
-Click "Use Template" in the top right of this page to create an own repository from it.
+![Unittests](https://github.com/hochfrequenz/btpingo/actions/workflows/test.yml/badge.svg)
+![coverage](https://github.com/hochfrequenz/btpingo/actions/workflows/coverage.yml/badge.svg)
+![golangci-lint](https://github.com/hochfrequenz/btpingo/actions/workflows/golangci-lint.yml/badge.svg)
 
-## Features
-It contains 
-* a minimal working example of a go package in [`foo`](/foo)
-* an example of an unittest written in gocrest
-* a valid go.mod and go.sum file
-* GitHub Actions to test code, measure the coverage, check formatting and prevent linting errors
+A Go client for apps on **SAP BTP Cloud Foundry** that call an **on-premise SAP system**. It covers:
+
+- **XSUAA:** it validates the JWTs your app receives.
+- **Destination service:** it looks up the destination by name.
+- **Connectivity service and Cloud Connector:** it fetches the Destination-service and Connectivity tokens a call needs and routes the call through the Connectivity proxy. It handles the CSRF handshake for mutating calls and the destination's own authentication.
+
+SAP's Cloud SDK covers this for Java and JavaScript only. Without it, every Go app on BTP rebuilds it.
+
+```sh
+go get github.com/hochfrequenz/btpingo
+```
+
+## Quick start
+
+```go
+ctx := context.Background()
+env, err := btpingo.LoadEnv() // VCAP_SERVICES: xsuaa, destination, connectivity
+if err != nil {
+	log.Fatal(err)
+}
+svc, err := btpingo.NewService(env, btpingo.WithUserAgent("my-service/1.0"))
+if err != nil {
+	log.Fatal(err)
+}
+validator, err := btpingo.NewJWTValidator(ctx, env.XSUAA)
+if err != nil {
+	log.Fatal(err)
+}
+
+r := gin.New()
+r.Use(btpingo.RequestID())
+api := r.Group("/api", validator.Middleware())
+api.GET("/ping", func(c *gin.Context) {
+	resp, err := svc.CallOnPremise(c.Request.Context(), "MY_SAP_DESTINATION",
+		http.MethodGet, "/sap/bc/ping?sap-client=100", nil, nil)
+	if err != nil {
+		btpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
+			"on-premise system unreachable", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	c.Status(resp.StatusCode)
+})
+```
+
+Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
+
+The full API surface is listed in the [package documentation](https://pkg.go.dev/github.com/hochfrequenz/btpingo).
+
+## Safety defaults
+
+- **Host pin:** an on-premise request always goes to the destination's own scheme and host. A path suffix, an authenticator or a redirect cannot steer it elsewhere. Redirects are followed only while they stay on that origin.
+- **Response size cap:** on-premise response bodies are capped at 10 MiB by default (`WithOnPremResponseSizeLimit`).
+- **Caching:** tokens and destination lookups are cached, and concurrent cache misses share a single upstream call.
+- **Request IDs:** an inbound `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`. Otherwise a fresh one is generated.
+
+## Origin and stability
+
+This code started as `internal/btp` in [go-sap-btp-cf-template](https://github.com/Hochfrequenz/go-sap-btp-cf-template). It is being extracted so that fixes reach every service as a dependency bump instead of being copied between forks.
+
+Until `v1.0.0` the API may change between minor versions. A breaking change is always named in the release notes. The gin-specific helpers (`Middleware`, `RequestID`, `RequireScope`, `MaxBodySize`, `AbortError`, `ProxyHandler`) are planned to move into a subpackage, so that the core can be used without gin.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

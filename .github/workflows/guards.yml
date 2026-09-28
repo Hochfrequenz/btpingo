@@ -1,0 +1,27 @@
+name: guards
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ripgrep
+        run: command -v rg || sudo apt-get install -y ripgrep
+      - name: No WARN-level logging
+        run: |
+          if grep -rnE --include='*.go' '\.Warn(Context)?\(' .; then
+            echo "::error::No WARN level: return an error, or log at INFO/DEBUG." >&2; exit 1
+          fi
+      - name: No hand-rolled error bodies, no err.Error() in responses
+        run: |
+          set -uo pipefail
+          fail=0
+          if rg -n -U --multiline-dotall --glob '*.go' --glob '!*_test.go' 'gin\.H\{.{0,400}?"error"' .; then
+            echo "::error::Write error responses with btpingo.AbortError." >&2; fail=1
+          fi
+          if rg -n -U --multiline-dotall --glob '*.go' --glob '!*_test.go' '(c\.(JSON|IndentedJSON|PureJSON|AsciiJSON|SecureJSON|AbortWithStatusJSON|String|XML|YAML|Data)|http\.Error)\(.{0,300}?err\.Error\(\)' .; then
+            echo "::error::err.Error() must not reach a client." >&2; fail=1
+          fi
+          exit $fail
