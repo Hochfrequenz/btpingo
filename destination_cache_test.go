@@ -132,6 +132,34 @@ func Test_DestinationCache_KeysByCredAndName(t *testing.T) {
 	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
 }
 
+// Test_DestinationCache_KeysByClientID guards the multi-tenant case: two
+// bindings that share a Destination-service URI but carry different
+// ClientIDs must not collapse into one cache entry, or one tenant's
+// lookup would silently serve another tenant's cached destination.
+func Test_DestinationCache_KeysByClientID(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":"http://sap","Authentication":"NoAuthentication","ProxyType":"OnPremise"}}`)
+	}))
+	defer srv.Close()
+
+	credA := &btpingo.DestCredentials{URI: srv.URL, ClientID: "tenant-a"}
+	credB := &btpingo.DestCredentials{URI: srv.URL, ClientID: "tenant-b"}
+	c := btpingo.NewDestinationCache(srv.Client(), time.Hour)
+
+	_, err := c.Lookup(context.Background(), credA, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	_, err = c.Lookup(context.Background(), credB, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+
+	// A repeat lookup for the first tenant must still be a cache hit.
+	_, err = c.Lookup(context.Background(), credA, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+}
+
 func Test_DestinationCache_PropagatesLookupError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
