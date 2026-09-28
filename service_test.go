@@ -45,7 +45,7 @@ type btpStack struct {
 // proxy forwards by path only, so the host need not resolve.
 const redirectDest = "http://sap.example:8000"
 
-func newBTPStack(t *testing.T, destBody string) *btpStack {
+func newBTPStack(t testing.TB, destBody string) *btpStack {
 	t.Helper()
 	s := &btpStack{}
 
@@ -442,7 +442,7 @@ func Test_Service_CallOnPremise_RejectsUnparseableDestinationURL(t *testing.T) {
 }
 
 // newRedirectStack is a btpStack whose destination is redirectDest.
-func newRedirectStack(t *testing.T) *btpStack {
+func newRedirectStack(t testing.TB) *btpStack {
 	t.Helper()
 	return newBTPStack(t, fmt.Sprintf(`{"destinationConfiguration":{"Name":"D","URL":%q,"ProxyType":"OnPremise","Authentication":"NoAuthentication"}}`, redirectDest))
 }
