@@ -35,10 +35,10 @@ var validRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // ValidRequestID reports whether id is safe to trust as an inbound
 // X-Request-Id: 1-64 characters, restricted to the charset a UUID or a
-// hex token uses. A caller-supplied request middleware (e.g.
-// ginpingo.RequestID) should fall back to [NewRequestID] when this
-// returns false, rather than echoing an arbitrary caller-supplied
-// string into logs and error envelopes.
+// hex token uses. A request-ID middleware (e.g. ginpingo.RequestID)
+// should fall back to [NewRequestID] when this returns false, rather
+// than echoing an arbitrary caller-supplied string into logs and error
+// envelopes.
 func ValidRequestID(id string) bool {
 	return validRequestIDPattern.MatchString(id)
 }

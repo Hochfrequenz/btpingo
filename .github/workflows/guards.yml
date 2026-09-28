@@ -37,6 +37,8 @@ jobs:
           exit $fail
       - name: Core package must not depend on gin
         run: |
-          if go list -deps . | grep -q github.com/gin-gonic/gin; then
+          set -euo pipefail
+          deps=$(go list -deps -test .)
+          if grep -qx github.com/gin-gonic/gin <<<"$deps"; then
             echo "::error::core package btpingo must not depend on gin" >&2; exit 1
           fi

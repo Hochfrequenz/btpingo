@@ -67,7 +67,7 @@ func NewValidator(t *testing.T, f *JWKSFixture, clientID string) (*btpingo.JWTVa
 	mux.HandleFunc("/token_keys", func(w http.ResponseWriter, r *http.Request) {
 		resp, err := http.Get(f.server.URL)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "fake jwks: upstream fetch failed", http.StatusInternalServerError)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()

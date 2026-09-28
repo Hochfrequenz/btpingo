@@ -131,3 +131,9 @@ func Test_JWT_PutsScopesOnTheRequestContext(t *testing.T) {
 	r.ServeHTTP(w, req)
 	then.AssertThat(t, w.Code, is.EqualTo(http.StatusOK))
 }
+
+func Test_ContextKeys_AreWireStable(t *testing.T) {
+	// Downstream code reads these literals via c.Get; changing them is a breaking change.
+	then.AssertThat(t, ginpingo.ClaimsContextKey, is.EqualTo("jwtClaims"))
+	then.AssertThat(t, ginpingo.RequestIDContextKey, is.EqualTo("request_id"))
+}

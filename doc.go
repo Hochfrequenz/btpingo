@@ -27,7 +27,6 @@
 //     [WithCSRFFetchPath], [WithDestinationCacheTTL], [WithOnPremResponseSizeLimit]
 //   - [DefaultOnPremiseTimeout], [DefaultMgmtTimeout], [DefaultUserAgent],
 //     [DefaultCSRFFetchPath], [DefaultOnPremResponseSizeLimit]
-//   - [SkipForwardedHeader]         — header filter shared with ginpingo.ProxyHandler
 //
 // ## JWT validation & request-scoped context
 //

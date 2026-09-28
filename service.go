@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/hochfrequenz/btpingo/internal/fwdheader"
 )
 
 // OnPremCaller is the single-method contract Gin handlers should depend
@@ -578,7 +580,7 @@ func (s *Service) callOnce(ctx context.Context, dest *Destination, method, pathS
 			}
 			continue
 		}
-		if SkipForwardedHeader(k) {
+		if fwdheader.Skip(k) {
 			continue
 		}
 		for _, v := range vs {
@@ -662,46 +664,6 @@ func (b *limitedOnPremBody) Read(p []byte) (int, error) {
 }
 
 func (b *limitedOnPremBody) Close() error { return b.rc.Close() }
-
-// SkipForwardedHeader filters headers that must not be forwarded from the
-// inbound request (e.g. via the approuter) to the on-prem call:
-//
-//   - Authorization: the destination's authenticator sets the right value;
-//     the inbound JWT is not a credential the on-prem system understands.
-//   - Proxy-Authorization: the on-prem transport sets it (http targets) or
-//     strips it (https targets) itself.
-//   - hop-by-hop (Connection, Keep-Alive, TE, Trailer, Transfer-Encoding,
-//     Upgrade, Proxy-Connect) per RFC 7230; forwarding them would confuse
-//     the Connectivity proxy.
-//   - Host: the net/http library derives the right value from the target
-//     URL; forwarding the inbound Host breaks virtual-host routing on
-//     the SAP side.
-//
-// Cookie is deliberately NOT in the drop list: callOnce does per-cookie
-// filtering via filterForwardedCookies so SAP session cookies
-// (SAP_SESSIONID_* / sap-usercontext) can flow through as part of the
-// CSRF handshake in CallOnPremiseMutating, while other cookies
-// (e.g. the approuter's JSESSIONID) are still dropped.
-//
-// Exported so [github.com/hochfrequenz/btpingo/ginpingo.ProxyHandler]
-// can apply the same filter to the response headers it relays back to
-// the client.
-func SkipForwardedHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "authorization",
-		"connection",
-		"keep-alive",
-		"proxy-authorization",
-		"proxy-connect",
-		"te",
-		"trailer",
-		"transfer-encoding",
-		"upgrade",
-		"host":
-		return true
-	}
-	return false
-}
 
 // filterForwardedCookies reads one inbound `Cookie:` header value and
 // returns a `Cookie:` value containing only cookies that are safe to

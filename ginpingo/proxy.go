@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/internal/fwdheader"
 )
 
 // isMutatingMethod returns true for HTTP methods that SAP's ICF
@@ -55,7 +56,7 @@ func ProxyHandler(svc *btpingo.Service) gin.HandlerFunc {
 		defer func() { _ = resp.Body.Close() }()
 
 		for k, vs := range resp.Header {
-			if btpingo.SkipForwardedHeader(k) {
+			if fwdheader.Skip(k) {
 				continue
 			}
 			for _, v := range vs {

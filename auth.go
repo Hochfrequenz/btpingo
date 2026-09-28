@@ -108,8 +108,10 @@ func ScopesFromClaims(claims jwt.MapClaims) []string {
 
 // scopesCtxKey is the private context key the validated token's scopes
 // are stashed under. Unexported and a struct type, so nothing outside
-// this package can collide with it or forge an entry — the only writer
-// is ginpingo.JWT, after the signature has been verified.
+// this package can collide with it or forge an entry. In production,
+// ginpingo.JWT is the only writer, and only after the signature has
+// been verified; ContextWithScopes is also called directly by tests
+// and by other adapters that authenticate by some other means.
 type scopesCtxKey struct{}
 
 // ContextWithScopes returns ctx carrying the given scopes.

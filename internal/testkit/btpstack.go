@@ -6,6 +6,7 @@
 package testkit
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,8 +91,12 @@ func NewBTPStack(t testing.TB, destBody string) *BTPStack {
 		w.Header().Set("X-Received-UA", r.Header.Get("User-Agent"))
 		w.Header().Set("X-Received-Location", r.Header.Get("SAP-Connectivity-SCC-Location_ID"))
 		w.Header().Set("X-Received-Cookie", r.Header.Get("Cookie"))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true,"path":"` + r.URL.Path + `"}`))
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(struct {
+			OK   bool   `json:"ok"`
+			Path string `json:"path"`
+		}{true, r.URL.Path})
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(s.OnPrem.Close)
 
@@ -128,7 +133,7 @@ func NewBTPStack(t testing.TB, destBody string) *BTPStack {
 		}}
 		resp, err := relay.Do(outReq)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, "fake proxy: relay failed", http.StatusBadGateway)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
