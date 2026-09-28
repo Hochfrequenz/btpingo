@@ -59,6 +59,11 @@ func NewJWTValidator(ctx context.Context, xsuaa *XSUAACredentials) (*JWTValidato
 		jwt.WithAudience(xsuaa.ClientID),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(TokenRefreshLeeway),
+		// jwt/v5 only validates iat when explicitly asked to; without
+		// this, a token claiming to have been issued in the future
+		// would parse as valid despite the doc comment above promising
+		// iat is checked.
+		jwt.WithIssuedAt(),
 	)
 
 	return &JWTValidator{xsuaa: xsuaa, keyfunc: kf.Keyfunc, parser: parser}, nil

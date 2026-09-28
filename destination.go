@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,18 +206,18 @@ func NewDestinationCache(httpClient *http.Client, ttl time.Duration) *Destinatio
 
 // Lookup returns a cached destination if one is still fresh, else
 // performs a fresh [LookupDestination] call. The cache key is
-// (cred.URI, name) only — deliberately not bearer, because the
-// destination's own content does not depend on which valid token was
-// used to ask for it, and keying on a token that itself rotates would
-// defeat the cache on every token refresh.
+// (cred.URI, cred.URL, cred.ClientID, name) — deliberately not bearer,
+// because the destination's own content does not depend on which valid
+// token was used to ask for it, and keying on a token that itself
+// rotates would defeat the cache on every token refresh.
 //
-// This key choice assumes the typical deployment shape: one process
-// serves exactly one *DestCredentials for its whole lifetime (loaded
-// once at startup by [LoadEnv], one CF app per SAP system). A caller that reused one *DestinationCache across
-// multiple tenants' *DestCredentials sharing the same URI — plausible
-// on a shared regional Destination-service endpoint, where tenant
-// isolation comes from the bearer token rather than the URL — would
-// need a tenant-scoped key instead; this type does not attempt that.
+// Keying by binding identity (URI, URL and ClientID) rather than URI
+// alone keeps this safe when one *DestinationCache is shared across
+// multiple *DestCredentials on a regional Destination-service endpoint
+// that hands out the same URI to every caller: ClientID separates
+// bindings, and URL separates subscriber tenants of one binding — they
+// share a ClientID but get a tenant-subdomain token URL of their own,
+// the same distinction [TokenFetcher] keys on.
 //
 // Concurrent misses for the same key collapse into one upstream call
 // via singleflight, for the same reason [TokenFetcher.Fetch] does:
@@ -226,7 +228,7 @@ func (c *DestinationCache) Lookup(ctx context.Context, cred *DestCredentials, be
 	if cred == nil {
 		return nil, ErrNoDestinationBinding
 	}
-	key := cred.URI + "|" + name
+	key := cacheKey(cred, name)
 
 	c.mu.Lock()
 	d, ok := c.cache[key]
@@ -259,9 +261,10 @@ func (c *DestinationCache) Lookup(ctx context.Context, cred *DestCredentials, be
 	return v.(*Destination), nil
 }
 
-// Invalidate drops the cached destination for (cred.URI, name). Call
-// this if a destination lookup's result turns out to be stale in a way
-// the TTL alone would not catch quickly enough — mirrors
+// Invalidate drops the cached destination for (cred.URI, cred.URL,
+// cred.ClientID, name). Call this if a destination lookup's result
+// turns out to be stale in a way the TTL alone would not catch quickly
+// enough — mirrors
 // [TokenFetcher.Invalidate]'s reason for existing, though nothing in
 // this package calls it yet (a destination lookup error is not, on its
 // own, evidence that a DIFFERENT cached value is wrong).
@@ -270,6 +273,26 @@ func (c *DestinationCache) Invalidate(cred *DestCredentials, name string) {
 		return
 	}
 	c.mu.Lock()
-	delete(c.cache, cred.URI+"|"+name)
+	delete(c.cache, cacheKey(cred, name))
 	c.mu.Unlock()
+}
+
+// cacheKey builds the DestinationCache key from (URI, URL, ClientID, name),
+// mirroring [TokenFetcher]'s own (URL, ClientID) identity: ClientID
+// separates one binding from another, and URL separates subscriber
+// tenants of one binding, which share a ClientID but get a
+// tenant-subdomain token URL of their own.
+//
+// Each component is length-prefixed rather than joined with a plain "|"
+// separator: a "|" occurring inside a URI, URL or ClientID value would
+// otherwise let two distinct (URI, URL, ClientID, name) tuples produce
+// the same string, colliding two unrelated cache entries.
+func cacheKey(cred *DestCredentials, name string) string {
+	var b strings.Builder
+	for _, part := range [...]string{cred.URI, cred.URL, cred.ClientID, name} {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+	}
+	return b.String()
 }

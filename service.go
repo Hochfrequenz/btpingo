@@ -210,9 +210,11 @@ func WithCSRFFetchPath(path string) ServiceOption {
 
 // WithOnPremResponseSizeLimit caps the per-call on-prem response body.
 // Reads that would push a single response past `bytes` return
-// ErrOnPremResponseTooLarge from the wrapped resp.Body. Zero resets to
-// DefaultOnPremResponseSizeLimit. Pass a larger value if a single
-// route legitimately returns more.
+// ErrOnPremResponseTooLarge from the wrapped resp.Body. Zero or
+// negative resets to DefaultOnPremResponseSizeLimit — a negative limit
+// has no sensible meaning as a cap, and limitedOnPremBody's slice math
+// assumes a non-negative one. Pass a larger value if a single route
+// legitimately returns more.
 func WithOnPremResponseSizeLimit(bytes int64) ServiceOption {
 	return func(o *serviceOptions) { o.onPremResponseSizeLimit = bytes }
 }
@@ -264,7 +266,7 @@ func NewService(env *Env, opts ...ServiceOption) (*Service, error) {
 	if o.csrfFetchPath == "" {
 		o.csrfFetchPath = DefaultCSRFFetchPath
 	}
-	if o.onPremResponseSizeLimit == 0 {
+	if o.onPremResponseSizeLimit <= 0 {
 		o.onPremResponseSizeLimit = DefaultOnPremResponseSizeLimit
 	}
 
@@ -668,7 +670,8 @@ func (b *limitedOnPremBody) Close() error { return b.rc.Close() }
 //
 //   - Authorization: the destination's authenticator sets the right value;
 //     the inbound JWT is not a credential the on-prem system understands.
-//   - Proxy-Authorization: the on-prem transport always sets a fresh token.
+//   - Proxy-Authorization: the on-prem transport sets it (http targets) or
+//     strips it (https targets) itself.
 //   - hop-by-hop (Connection, Keep-Alive, TE, Trailer, Transfer-Encoding,
 //     Upgrade, Proxy-Connect) per RFC 7230; forwarding them would confuse
 //     the Connectivity proxy.

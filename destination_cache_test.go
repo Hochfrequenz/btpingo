@@ -132,6 +132,95 @@ func Test_DestinationCache_KeysByCredAndName(t *testing.T) {
 	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
 }
 
+// Test_DestinationCache_KeysByClientID guards the multi-tenant case: two
+// bindings that share a Destination-service URI but carry different
+// ClientIDs must not collapse into one cache entry, or one tenant's
+// lookup would silently serve another tenant's cached destination.
+func Test_DestinationCache_KeysByClientID(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":"http://sap","Authentication":"NoAuthentication","ProxyType":"OnPremise"}}`)
+	}))
+	defer srv.Close()
+
+	credA := &btpingo.DestCredentials{URI: srv.URL, ClientID: "tenant-a"}
+	credB := &btpingo.DestCredentials{URI: srv.URL, ClientID: "tenant-b"}
+	c := btpingo.NewDestinationCache(srv.Client(), time.Hour)
+
+	_, err := c.Lookup(context.Background(), credA, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	_, err = c.Lookup(context.Background(), credB, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+
+	// A repeat lookup for the first tenant must still be a cache hit.
+	_, err = c.Lookup(context.Background(), credA, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+}
+
+// Test_DestinationCache_KeysByURL covers two *DestCredentials that share
+// a URI and a ClientID — the same binding — but differ in the
+// tenant-subdomain token URL, the shape a regional Destination-service
+// endpoint hands to separate subscriber tenants of one binding. They
+// must not collide on the same cache entry.
+func Test_DestinationCache_KeysByURL(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":"http://sap","Authentication":"NoAuthentication","ProxyType":"OnPremise"}}`)
+	}))
+	defer srv.Close()
+
+	credTenant1 := &btpingo.DestCredentials{URI: srv.URL, ClientID: "binding-1", URL: "https://tenant1.authentication.eu10.hana.ondemand.com"}
+	credTenant2 := &btpingo.DestCredentials{URI: srv.URL, ClientID: "binding-1", URL: "https://tenant2.authentication.eu10.hana.ondemand.com"}
+	c := btpingo.NewDestinationCache(srv.Client(), time.Hour)
+
+	_, err := c.Lookup(context.Background(), credTenant1, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	_, err = c.Lookup(context.Background(), credTenant2, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+
+	// A repeat lookup for the first tenant must still be a cache hit.
+	_, err = c.Lookup(context.Background(), credTenant1, "t", "D")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+}
+
+// Test_DestinationCache_KeyIsUnambiguous pins a length-prefixed cacheKey:
+// a plain "|"-joined key lets the separator inside one field's own value
+// shift where a neighboring field's boundary falls, so two distinct
+// (URI, URL, ClientID, name) tuples can join into the identical string.
+// Here credA's URL "a|b" and credB's URI suffix "|a" would, under a naive
+// join, both produce ".../x|a|b|c|d" — a collision that must not happen.
+func Test_DestinationCache_KeyIsUnambiguous(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":"http://sap","Authentication":"NoAuthentication","ProxyType":"OnPremise"}}`)
+	}))
+	defer srv.Close()
+
+	credA := &btpingo.DestCredentials{URI: srv.URL + "/x", URL: "a|b", ClientID: "c"}
+	credB := &btpingo.DestCredentials{URI: srv.URL + "/x|a", URL: "b", ClientID: "c"}
+	c := btpingo.NewDestinationCache(srv.Client(), time.Hour)
+
+	_, err := c.Lookup(context.Background(), credA, "t", "d")
+	then.AssertThat(t, err, is.Nil())
+	_, err = c.Lookup(context.Background(), credB, "t", "d")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+
+	// Repeats for each must still be cache hits.
+	_, err = c.Lookup(context.Background(), credA, "t", "d")
+	then.AssertThat(t, err, is.Nil())
+	_, err = c.Lookup(context.Background(), credB, "t", "d")
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, int(calls.Load()), is.EqualTo(2))
+}
+
 func Test_DestinationCache_PropagatesLookupError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

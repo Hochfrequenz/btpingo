@@ -690,6 +690,31 @@ func Test_Service_CallOnPremise_AllowsResponseUnderLimit(t *testing.T) {
 	then.AssertThat(t, len(body) > 0, is.True())
 }
 
+// Test_Service_CallOnPremise_NegativeSizeLimitFallsBackToDefault pins
+// the fallback: a negative WithOnPremResponseSizeLimit is not a
+// sensible cap (limitedOnPremBody's slice math assumes non-negative),
+// so NewService must treat it like zero and fall back to
+// DefaultOnPremResponseSizeLimit rather than let it reach the wrapper
+// and panic on the first read.
+func Test_Service_CallOnPremise_NegativeSizeLimitFallsBackToDefault(t *testing.T) {
+	s := newBTPStack(t, `{
+		"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":"http://placeholder","Authentication":"NoAuthentication","ProxyType":"OnPremise"}
+	}`)
+	// newBTPStack's on-prem returns a small JSON ({"ok":true,...}),
+	// well under any sensible cap.
+
+	svc, err := btpingo.NewService(s.env, btpingo.WithOnPremResponseSizeLimit(-1))
+	then.AssertThat(t, err, is.Nil())
+
+	resp, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, len(body) > 0, is.True())
+}
+
 // Test_Service_CallOnPremise_WithOnPremiseTimeout proves the timeout
 // option actually reaches the http.Client wrapping the on-prem transport.
 // We stand up an on-prem server that sleeps longer than the configured
