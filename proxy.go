@@ -18,14 +18,16 @@ type ConnTokenProvider func(ctx *http.Request) (string, error)
 // NewOnPremiseTransport builds a RoundTripper that routes every request
 // through the Connectivity service's on-premise reverse proxy.
 //
-// Proxy-Authorization must always be `Bearer <conn-token>`. For HTTPS
-// targets Go's standard library sends it on the CONNECT tunnel via
-// Transport.GetProxyConnectHeader (wired here, per-request); for plain
-// HTTP targets the header travels with the forwarded request itself
-// (the proxy consumes it before forwarding). Wiring the CONNECT header
-// per-request rather than per-Transport is what lets the RoundTripper
-// stop cloning the Transport on every call — the idle-connection pool
-// stays shared across calls.
+// Proxy-Authorization carries `Bearer <conn-token>`, but only on the leg
+// that actually needs it. For HTTPS targets the request travels inside
+// the CONNECT tunnel, so the far end (the SAP origin) never sees this
+// header — only the CONNECT itself does, via
+// Transport.GetProxyConnectHeader (wired here, per-request). For plain
+// HTTP targets there is no tunnel, so the header has to travel with the
+// forwarded request itself (the proxy consumes it before forwarding).
+// Wiring the CONNECT header per-request rather than per-Transport is
+// what lets the RoundTripper stop cloning the Transport on every call —
+// the idle-connection pool stays shared across calls.
 //
 // The transport attaches Proxy-Authorization to every request it carries,
 // including a redirect's follow-up. Service's own client therefore only
@@ -57,13 +59,11 @@ func NewOnPremiseTransport(conn *ConnCredentials, provider ConnTokenProvider) (h
 			// so we hand it a bare request carrying the right context.
 			// The provider reads ctx.Done / request cancellation only.
 			//
-			// For HTTPS targets this provider is called twice per
-			// request (once here for the CONNECT header, once in
-			// RoundTrip for the body-leg Proxy-Authorization). The
-			// production TokenFetcher caches, so both calls are
-			// cache hits on the hot path and the second call is a
-			// sync.Map lookup. First call after cache expiry is the
-			// only case that re-fetches twice.
+			// This is the only call to the provider for an HTTPS
+			// request: RoundTrip does not set Proxy-Authorization on
+			// the forwarded request in that case, since it would
+			// reach the SAP origin inside the tunnel rather than
+			// stopping at the proxy.
 			tok, err := provider((&http.Request{}).WithContext(ctx))
 			if err != nil {
 				return nil, err
@@ -80,18 +80,27 @@ type onPremiseRoundTripper struct {
 }
 
 func (t *onPremiseRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	tok, err := t.token(req)
-	if err != nil {
-		return nil, err
-	}
 	// Clone before mutating so a retry (by the caller) sees the original.
-	// Plain-HTTP targets carry Proxy-Authorization as a request header
-	// (the proxy consumes it before forwarding). HTTPS targets use the
-	// Transport's GetProxyConnectHeader instead, wired in
-	// NewOnPremiseTransport. We do NOT clone the base Transport here:
-	// cloning would create a fresh idle-connection pool on every call.
+	// We do NOT clone the base Transport here: cloning would create a
+	// fresh idle-connection pool on every call.
 	r := req.Clone(req.Context())
-	r.Header.Set("Proxy-Authorization", "Bearer "+tok)
+	if r.URL.Scheme == "http" {
+		// Plain-HTTP targets have no CONNECT tunnel, so
+		// Proxy-Authorization has to travel as a request header (the
+		// proxy consumes it before forwarding to the SAP origin).
+		tok, err := t.token(req)
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Proxy-Authorization", "Bearer "+tok)
+	} else {
+		// HTTPS (and anything else): the request travels inside the
+		// CONNECT tunnel set up via GetProxyConnectHeader, so the SAP
+		// origin — not just the proxy — would see this header if we
+		// set it here. Strip whatever the caller may have set and
+		// leave authentication to the tunnel handshake.
+		r.Header.Del("Proxy-Authorization")
+	}
 	return t.base.RoundTrip(r)
 }
 
