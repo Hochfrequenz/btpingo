@@ -148,6 +148,41 @@ func Test_JWTValidator_RejectsExpired(t *testing.T) {
 	then.AssertThat(t, strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "exp"), is.True())
 }
 
+// Test_JWTValidator_RejectsFutureIssuedAt pins the doc comment's claim
+// that iat is validated: jwt/v5 only checks it with jwt.WithIssuedAt()
+// passed explicitly, so a token claiming to be issued two hours in the
+// future must be rejected.
+func Test_JWTValidator_RejectsFutureIssuedAt(t *testing.T) {
+	f := newJWKSFixture(t)
+	v, issuer := newValidator(t, f, "GoApp")
+	raw := f.mint(t, jwt.MapClaims{
+		"iss": issuer,
+		"aud": "GoApp",
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Add(2 * time.Hour).Unix(),
+	})
+	_, err := v.Parse(raw)
+	then.AssertThat(t, err, is.Not(is.Nil()))
+}
+
+// Test_JWTValidator_AcceptsCurrentIssuedAt pairs with the future-iat
+// test: a token issued now must still pass once iat is validated.
+func Test_JWTValidator_AcceptsCurrentIssuedAt(t *testing.T) {
+	f := newJWKSFixture(t)
+	v, issuer := newValidator(t, f, "GoApp")
+	raw := f.mint(t, jwt.MapClaims{
+		"iss": issuer,
+		"aud": "GoApp",
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+		"sub": "user-1",
+	})
+	claims, err := v.Parse(raw)
+	then.AssertThat(t, err, is.Nil())
+	sub, _ := claims["sub"].(string)
+	then.AssertThat(t, sub, is.EqualTo("user-1"))
+}
+
 func Test_JWTValidator_RejectsHS256(t *testing.T) {
 	f := newJWKSFixture(t)
 	v, _ := newValidator(t, f, "GoApp")
