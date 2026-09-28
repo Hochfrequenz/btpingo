@@ -37,8 +37,8 @@ type csrfSAPServer struct {
 	fetchPath      string
 	fetchHits      atomic.Int32
 	mutatingHits   atomic.Int32
-	lastMutatingCk string       // the cookies the mutating call carried
-	lastMutatingTk string       // the token the mutating call carried
+	lastMutatingCk atomic.Value // string: the cookies the mutating call carried
+	lastMutatingTk atomic.Value // string: the token the mutating call carried
 	currentToken   atomic.Value // string — swapped to simulate server-side session recycle
 }
 
@@ -64,10 +64,12 @@ func newCSRFSAPServer(fetchPath, initialToken string) *csrfSAPServer {
 		}
 		// Mutating path.
 		s.mutatingHits.Add(1)
-		s.lastMutatingTk = r.Header.Get("X-CSRF-Token")
-		s.lastMutatingCk = r.Header.Get("Cookie")
+		// atomic.Value: the singleflight test sends concurrent mutating calls.
+		gotTk := r.Header.Get("X-CSRF-Token")
+		s.lastMutatingTk.Store(gotTk)
+		s.lastMutatingCk.Store(r.Header.Get("Cookie"))
 		expected, _ := s.currentToken.Load().(string)
-		if s.lastMutatingTk != expected {
+		if gotTk != expected {
 			// SAP's real signal: 403 + explicit header.
 			w.Header().Set("X-CSRF-Token", "Required")
 			w.WriteHeader(http.StatusForbidden)
@@ -158,11 +160,11 @@ func Test_CallOnPremiseMutating_RunsHandshakeAndAttaches(t *testing.T) {
 	then.AssertThat(t, int(sap.fetchHits.Load()), is.EqualTo(1))
 	then.AssertThat(t, int(sap.mutatingHits.Load()), is.EqualTo(1))
 	// Mutating call carried the token.
-	then.AssertThat(t, sap.lastMutatingTk, is.EqualTo("tok-1"))
+	then.AssertThat(t, sap.lastMutatingTk.Load(), is.EqualTo[any]("tok-1"))
 	// And both cookies passed through the forward filter, joined in
 	// one header value per RFC 6265.
-	then.AssertThat(t, strings.Contains(sap.lastMutatingCk, "SAP_SESSIONID_ABC_100=abc123"), is.True())
-	then.AssertThat(t, strings.Contains(sap.lastMutatingCk, "sap-usercontext=sapclient100"), is.True())
+	then.AssertThat(t, strings.Contains(sap.lastMutatingCk.Load().(string), "SAP_SESSIONID_ABC_100=abc123"), is.True())
+	then.AssertThat(t, strings.Contains(sap.lastMutatingCk.Load().(string), "sap-usercontext=sapclient100"), is.True())
 }
 
 // Test_CallOnPremiseMutating_CachesStateAcrossCalls pins that a second
@@ -224,7 +226,7 @@ func Test_CallOnPremiseMutating_RefetchesOnCSRFRequired(t *testing.T) {
 	// Three mutating attempts (first success + failed retry + successful retry).
 	then.AssertThat(t, int(sap.mutatingHits.Load()), is.EqualTo(3))
 	// Final mutating call carried the new token.
-	then.AssertThat(t, sap.lastMutatingTk, is.EqualTo("tok-new"))
+	then.AssertThat(t, sap.lastMutatingTk.Load(), is.EqualTo[any]("tok-new"))
 }
 
 // Test_CallOnPremiseMutating_SurfacesRealForbidden pins that a 403
@@ -450,5 +452,5 @@ func Test_CallOnPremiseMutating_CustomFetchPath(t *testing.T) {
 	_ = resp.Body.Close()
 
 	then.AssertThat(t, int(sap.fetchHits.Load()), is.EqualTo(1))
-	then.AssertThat(t, sap.lastMutatingTk, is.EqualTo("tok-custom"))
+	then.AssertThat(t, sap.lastMutatingTk.Load(), is.EqualTo[any]("tok-custom"))
 }
