@@ -6,6 +6,13 @@ linters:
     - dupl
     - goconst
     - gocyclo
+  settings:
+    goconst:
+      # Repeated literals in test fixtures and request/header composite
+      # literals are not magic strings; keep goconst on executable code.
+      exclude-types:
+        - Call
+        - CompositeLit
 
 formatters:
   enable:
