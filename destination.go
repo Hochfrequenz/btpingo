@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,17 +206,18 @@ func NewDestinationCache(httpClient *http.Client, ttl time.Duration) *Destinatio
 
 // Lookup returns a cached destination if one is still fresh, else
 // performs a fresh [LookupDestination] call. The cache key is
-// (cred.URI, cred.ClientID, name) — deliberately not bearer, because
-// the destination's own content does not depend on which valid token
-// was used to ask for it, and keying on a token that itself rotates
-// would defeat the cache on every token refresh.
+// (cred.URI, cred.URL, cred.ClientID, name) — deliberately not bearer,
+// because the destination's own content does not depend on which valid
+// token was used to ask for it, and keying on a token that itself
+// rotates would defeat the cache on every token refresh.
 //
-// Keying by binding identity (URI plus ClientID) rather than URI alone
-// keeps this safe when one *DestinationCache is shared across multiple
-// tenants' *DestCredentials on a regional Destination-service endpoint
-// that hands out the same URI to every tenant and relies on the bearer
-// token (implied by ClientID) for isolation: without ClientID in the
-// key, two tenants would collide on the same cache entry.
+// Keying by binding identity (URI, URL and ClientID) rather than URI
+// alone keeps this safe when one *DestinationCache is shared across
+// multiple *DestCredentials on a regional Destination-service endpoint
+// that hands out the same URI to every caller: ClientID separates
+// bindings, and URL separates subscriber tenants of one binding — they
+// share a ClientID but get a tenant-subdomain token URL of their own,
+// the same distinction [TokenFetcher] keys on.
 //
 // Concurrent misses for the same key collapse into one upstream call
 // via singleflight, for the same reason [TokenFetcher.Fetch] does:
@@ -258,9 +261,10 @@ func (c *DestinationCache) Lookup(ctx context.Context, cred *DestCredentials, be
 	return v.(*Destination), nil
 }
 
-// Invalidate drops the cached destination for (cred.URI, cred.ClientID,
-// name). Call this if a destination lookup's result turns out to be
-// stale in a way the TTL alone would not catch quickly enough — mirrors
+// Invalidate drops the cached destination for (cred.URI, cred.URL,
+// cred.ClientID, name). Call this if a destination lookup's result
+// turns out to be stale in a way the TTL alone would not catch quickly
+// enough — mirrors
 // [TokenFetcher.Invalidate]'s reason for existing, though nothing in
 // this package calls it yet (a destination lookup error is not, on its
 // own, evidence that a DIFFERENT cached value is wrong).
@@ -273,10 +277,22 @@ func (c *DestinationCache) Invalidate(cred *DestCredentials, name string) {
 	c.mu.Unlock()
 }
 
-// cacheKey builds the DestinationCache key from binding identity rather
-// than URI alone, so two *DestCredentials sharing a Destination-service
-// URI but issued to different tenants (different ClientID) never share
-// a cache entry.
+// cacheKey builds the DestinationCache key from (URI, URL, ClientID, name),
+// mirroring [TokenFetcher]'s own (URL, ClientID) identity: ClientID
+// separates one binding from another, and URL separates subscriber
+// tenants of one binding, which share a ClientID but get a
+// tenant-subdomain token URL of their own.
+//
+// Each component is length-prefixed rather than joined with a plain "|"
+// separator: a "|" occurring inside a URI, URL or ClientID value would
+// otherwise let two distinct (URI, URL, ClientID, name) tuples produce
+// the same string, colliding two unrelated cache entries.
 func cacheKey(cred *DestCredentials, name string) string {
-	return cred.URI + "|" + cred.ClientID + "|" + name
+	var b strings.Builder
+	for _, part := range [...]string{cred.URI, cred.URL, cred.ClientID, name} {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+	}
+	return b.String()
 }

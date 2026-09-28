@@ -98,6 +98,7 @@ func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		defer func() { _ = upstream.Close() }()
 		w.WriteHeader(http.StatusOK)
 
 		hj, ok := w.(http.Hijacker)
@@ -109,6 +110,10 @@ func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
 		if err != nil {
 			return
 		}
+		defer func() { _ = client.Close() }()
+		// Closing both conns on handler exit unblocks whichever io.Copy
+		// direction is still waiting on the other, so the goroutine
+		// below always ends instead of leaking past the test.
 		go func() { _, _ = io.Copy(upstream, client) }()
 		_, _ = io.Copy(client, upstream)
 	}))
@@ -130,6 +135,10 @@ func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
 	then.AssertThat(t, err, is.Nil())
+	// A caller-supplied Proxy-Authorization must not survive to the
+	// origin either — RoundTrip has to strip it, not just refrain from
+	// setting its own, exercising the r.Header.Del path below.
+	req.Header.Set("Proxy-Authorization", "Bearer caller-supplied")
 	resp, err := rt.RoundTrip(req)
 	then.AssertThat(t, err, is.Nil())
 	_ = resp.Body.Close()

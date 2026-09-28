@@ -35,11 +35,13 @@ type ConnTokenProvider func(ctx *http.Request) (string, error)
 // what lets the RoundTripper stop cloning the Transport on every call —
 // the idle-connection pool stays shared across calls.
 //
-// The transport attaches Proxy-Authorization to every request it carries,
-// including a redirect's follow-up. Service's own client therefore only
-// follows redirects that stay on the original scheme+host (see
-// [ErrOnPremCrossOriginRedirect]); a caller wrapping this transport in
-// its own http.Client should set an equivalent CheckRedirect.
+// For plain-HTTP targets the transport attaches Proxy-Authorization to
+// every request it carries, including a redirect's follow-up; for HTTPS
+// targets every new CONNECT tunnel carries it. Service's own client
+// therefore only follows redirects that stay on the original
+// scheme+host (see [ErrOnPremCrossOriginRedirect]); a caller wrapping
+// this transport in its own http.Client should set an equivalent
+// CheckRedirect.
 func NewOnPremiseTransport(conn *ConnCredentials, provider ConnTokenProvider) (http.RoundTripper, error) {
 	if conn == nil {
 		return nil, ErrNoConnectivityBinding
@@ -59,15 +61,18 @@ func NewOnPremiseTransport(conn *ConnCredentials, provider ConnTokenProvider) (h
 	base := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		GetProxyConnectHeader: func(ctx context.Context, _ *url.URL, _ string) (http.Header, error) {
-			// net/http calls this when opening a CONNECT tunnel for an
-			// HTTPS target. We expose only ctx to the provider; the
-			// existing ConnTokenProvider signature takes *http.Request,
-			// so we hand it a bare request carrying the right context.
-			// The provider reads ctx.Done / request cancellation only.
+			// net/http calls this when opening a new CONNECT tunnel for
+			// an HTTPS target; a request that reuses an already-open
+			// tunnel does not call it again and rides on the token the
+			// tunnel was opened with, since the proxy only checks
+			// Proxy-Authorization at CONNECT time, not per request. We
+			// expose only ctx to the provider; the existing
+			// ConnTokenProvider signature takes *http.Request, so we
+			// hand it a bare request carrying the right context. The
+			// provider reads ctx.Done / request cancellation only.
 			//
-			// This is the only call to the provider for an HTTPS
-			// request: RoundTrip does not set Proxy-Authorization on
-			// the forwarded request in that case, since it would
+			// RoundTrip does not set Proxy-Authorization on the
+			// forwarded request for an HTTPS target, since it would
 			// reach the SAP origin inside the tunnel rather than
 			// stopping at the proxy.
 			tok, err := provider((&http.Request{}).WithContext(ctx))

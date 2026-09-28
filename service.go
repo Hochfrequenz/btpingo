@@ -670,7 +670,8 @@ func (b *limitedOnPremBody) Close() error { return b.rc.Close() }
 //
 //   - Authorization: the destination's authenticator sets the right value;
 //     the inbound JWT is not a credential the on-prem system understands.
-//   - Proxy-Authorization: the on-prem transport always sets a fresh token.
+//   - Proxy-Authorization: the on-prem transport sets it (http targets) or
+//     strips it (https targets) itself.
 //   - hop-by-hop (Connection, Keep-Alive, TE, Trailer, Transfer-Encoding,
 //     Upgrade, Proxy-Connect) per RFC 7230; forwarding them would confuse
 //     the Connectivity proxy.
