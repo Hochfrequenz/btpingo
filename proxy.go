@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// schemeHTTP names the one URL scheme that has no CONNECT tunnel and so
+// needs Proxy-Authorization on the request itself. Named rather than
+// repeated as a literal so RoundTrip's scheme check reads as intentional,
+// not an arbitrary string comparison.
+const schemeHTTP = "http"
+
 // ConnTokenProvider yields a fresh connectivity-service bearer token per
 // request. Accepting a request here means cancellation on the caller's
 // request propagates into the token fetch — without it, a slow XSUAA
@@ -84,7 +90,7 @@ func (t *onPremiseRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	// We do NOT clone the base Transport here: cloning would create a
 	// fresh idle-connection pool on every call.
 	r := req.Clone(req.Context())
-	if r.URL.Scheme == "http" {
+	if r.URL.Scheme == schemeHTTP {
 		// Plain-HTTP targets have no CONNECT tunnel, so
 		// Proxy-Authorization has to travel as a request header (the
 		// proxy consumes it before forwarding to the SAP origin).
