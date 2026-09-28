@@ -1,4 +1,4 @@
-package btpingo_test
+package ginpingo_test
 
 import (
 	"encoding/json"
@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/ginpingo"
 )
 
 // Test_AbortError_WritesEnvelopeAndLeaksNothing is the core contract:
@@ -22,7 +23,7 @@ func Test_AbortError_WritesEnvelopeAndLeaksNothing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/boom", func(c *gin.Context) {
-		btpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
+		ginpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
 			"on-premise call failed",
 			errors.New("sensitive: sap-host unreachable; internal token=abcd1234"))
 	})
@@ -56,15 +57,15 @@ func Test_AbortError_WritesEnvelopeAndLeaksNothing(t *testing.T) {
 }
 
 // Test_AbortError_IncludesRequestIDWhenSet mirrors how the RequestID
-// middleware populates c.Set("request_id", ...). Pinning the behaviour
-// here keeps AbortError's request-ID propagation independent of the
-// middleware itself.
+// middleware populates c.Set(ginpingo.RequestIDContextKey, ...).
+// Pinning the behaviour here keeps AbortError's request-ID propagation
+// independent of the middleware itself.
 func Test_AbortError_IncludesRequestIDWhenSet(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(func(c *gin.Context) { c.Set("request_id", "rid-42"); c.Next() })
+	r.Use(func(c *gin.Context) { c.Set(ginpingo.RequestIDContextKey, "rid-42"); c.Next() })
 	r.GET("/boom", func(c *gin.Context) {
-		btpingo.AbortError(c, http.StatusUnauthorized, btpingo.CodeUnauthorized,
+		ginpingo.AbortError(c, http.StatusUnauthorized, btpingo.CodeUnauthorized,
 			"missing bearer token", nil)
 	})
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/internal/testkit"
 )
 
 // FuzzCallOnPremise_StaysOnDestinationOrigin: whatever the caller-supplied
@@ -20,18 +21,18 @@ func FuzzCallOnPremise_StaysOnDestinationOrigin(f *testing.F) {
 		"/%2e%2e/", "../../x", "http://evil.example/", "//evil.example:8000/x", "\\\\evil", "/redirect-off-host", "/redirect-other-scheme", "/redirect-other-port"} {
 		f.Add(seed)
 	}
-	s := newRedirectStack(f)
-	svc, err := btpingo.NewService(s.env)
+	s := testkit.NewRedirectStack(f)
+	svc, err := btpingo.NewService(s.Env)
 	if err != nil {
 		f.Fatal(err)
 	}
 	f.Fuzz(func(t *testing.T, suffix string) {
-		before := s.strayCalls.Load()
+		before := s.StrayCalls.Load()
 		resp, _ := svc.CallOnPremise(context.Background(), "D", http.MethodGet, suffix, nil, nil)
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		if got := s.strayCalls.Load() - before; got != 0 {
+		if got := s.StrayCalls.Load() - before; got != 0 {
 			t.Fatalf("suffix %q reached a foreign origin %d time(s)", suffix, got)
 		}
 	})

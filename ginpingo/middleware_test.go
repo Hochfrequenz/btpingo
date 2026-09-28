@@ -1,4 +1,4 @@
-package btpingo_test
+package ginpingo_test
 
 import (
 	"bytes"
@@ -15,14 +15,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/ginpingo"
 )
 
 func Test_RequestID_GeneratesWhenAbsent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) {
-		rid, _ := c.Get(btpingo.RequestIDContextKey)
+		rid, _ := c.Get(ginpingo.RequestIDContextKey)
 		c.String(http.StatusOK, rid.(string))
 	})
 
@@ -42,7 +43,7 @@ func Test_RequestID_GeneratesWhenAbsent(t *testing.T) {
 func Test_RequestID_PreservesInbound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -61,7 +62,7 @@ func Test_RequestID_PreservesInbound(t *testing.T) {
 func Test_RequestID_RejectsOversizedInbound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	oversized := make([]byte, 65)
@@ -88,7 +89,7 @@ func Test_RequestID_RejectsOversizedInbound(t *testing.T) {
 func Test_RequestID_AcceptsMaxLengthInbound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	maxLength := make([]byte, 64)
@@ -113,7 +114,7 @@ func Test_RequestID_AcceptsMaxLengthInbound(t *testing.T) {
 func Test_RequestID_RejectsDisallowedCharacters(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -129,7 +130,7 @@ func Test_RequestID_RejectsDisallowedCharacters(t *testing.T) {
 func Test_RequestID_PropagatesThroughContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/x", func(c *gin.Context) {
 		got := btpingo.RequestIDFromContext(c.Request.Context())
 		c.String(http.StatusOK, got)
@@ -168,12 +169,12 @@ func Test_ContextWithRequestID_RoundTrips(t *testing.T) {
 		btpingo.ContextWithRequestID(ctx, "def456")), is.EqualTo("def456"))
 }
 
-// stubClaimsMiddleware simulates JWTValidator.Middleware for scope tests
-// without standing up a JWKS / token pair. We only need the "jwtClaims"
-// key to be populated; RequireScope is tested end-to-end elsewhere.
+// stubClaimsMiddleware simulates ginpingo.JWT for scope tests without
+// standing up a JWKS / token pair. We only need ClaimsContextKey to be
+// populated; RequireScope is tested end-to-end elsewhere.
 func stubClaimsMiddleware(claims jwt.MapClaims) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Set("jwtClaims", claims)
+		c.Set(ginpingo.ClaimsContextKey, claims)
 		c.Next()
 	}
 }
@@ -184,7 +185,7 @@ func Test_RequireScope_AllowsWhenScopeArrayContains(t *testing.T) {
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{
 		"scope": []any{"User", "Admin"},
 	}))
-	r.GET("/admin", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/admin", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
 
@@ -201,7 +202,7 @@ func Test_RequireScope_AllowsWhenScopeStringContains(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{"scope": "User Admin"}))
-	r.GET("/admin", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/admin", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
 
@@ -218,7 +219,7 @@ func Test_RequireScope_RejectsMissingScope(t *testing.T) {
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{
 		"scope": []any{"User"},
 	}))
-	r.GET("/admin", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/admin", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		t.Fatal("handler should not run")
 	})
 
@@ -240,7 +241,7 @@ func Test_RequireScope_RejectsPartialMatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{"scope": []any{"Unauthorized-User"}}))
-	r.GET("/x", btpingo.RequireScope("User"), func(c *gin.Context) {
+	r.GET("/x", ginpingo.RequireScope("User"), func(c *gin.Context) {
 		t.Fatal("handler should not run")
 	})
 
@@ -259,7 +260,7 @@ func Test_RequireScope_RejectsPrefixMatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{"scope": []any{"Admin.Read"}}))
-	r.GET("/x", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/x", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		t.Fatal("handler should not run")
 	})
 
@@ -271,15 +272,15 @@ func Test_RequireScope_RejectsPrefixMatch(t *testing.T) {
 }
 
 // Test_RequireScope_AllowsWhenScopeStringSliceContains covers the
-// []string wire shape that extractScopes explicitly supports but none
-// of the other tests exercise.
+// []string wire shape that ScopesFromClaims explicitly supports but
+// none of the other tests exercise.
 func Test_RequireScope_AllowsWhenScopeStringSliceContains(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{
 		"scope": []string{"User", "Admin"},
 	}))
-	r.GET("/admin", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/admin", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
 
@@ -299,7 +300,7 @@ func Test_RequireScope_StringClaimWithDoubleSpaces(t *testing.T) {
 	r := gin.New()
 	// Deliberately messy: leading space, double space between tokens, trailing tab.
 	r.Use(stubClaimsMiddleware(jwt.MapClaims{"scope": "  User   Admin\t"}))
-	r.GET("/admin", btpingo.RequireScope("Admin"), func(c *gin.Context) {
+	r.GET("/admin", ginpingo.RequireScope("Admin"), func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
 
@@ -311,11 +312,11 @@ func Test_RequireScope_StringClaimWithDoubleSpaces(t *testing.T) {
 }
 
 func Test_RequireScope_RejectsWhenMiddlewareAbsent(t *testing.T) {
-	// No stubClaimsMiddleware — jwtClaims is absent. RequireScope must
+	// No stubClaimsMiddleware — claims are absent. RequireScope must
 	// treat that as forbidden, not as "let through".
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.GET("/x", btpingo.RequireScope("User"), func(c *gin.Context) {
+	r.GET("/x", ginpingo.RequireScope("User"), func(c *gin.Context) {
 		t.Fatal("handler should not run")
 	})
 
@@ -332,7 +333,7 @@ func Test_RequireScope_RejectsWhenMiddlewareAbsent(t *testing.T) {
 func Test_MaxBodySize_RejectsOversizedContentLength(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID(), btpingo.MaxBodySize(1024)) // 1 KiB cap for the test
+	r.Use(ginpingo.RequestID(), ginpingo.MaxBodySize(1024)) // 1 KiB cap for the test
 	bodyReadCount := 0
 	r.POST("/x", func(c *gin.Context) {
 		// Should never run — middleware aborts before us.
@@ -363,7 +364,7 @@ func Test_MaxBodySize_RejectsOversizedContentLength(t *testing.T) {
 func Test_MaxBodySize_AllowsBodiesUnderLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.MaxBodySize(1024))
+	r.Use(ginpingo.MaxBodySize(1024))
 	r.POST("/x", func(c *gin.Context) {
 		raw, err := io.ReadAll(c.Request.Body)
 		then.AssertThat(t, err, is.Nil())
@@ -388,7 +389,7 @@ func Test_MaxBodySize_AllowsBodiesUnderLimit(t *testing.T) {
 func Test_MaxBodySize_CapsLyingContentLength(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.MaxBodySize(1024))
+	r.Use(ginpingo.MaxBodySize(1024))
 	var readErr error
 	var readBytes int
 	r.POST("/x", func(c *gin.Context) {
@@ -415,9 +416,9 @@ func Test_MaxBodySize_CapsLyingContentLength(t *testing.T) {
 func Test_RequestID_PopulatesErrorEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(btpingo.RequestID())
+	r.Use(ginpingo.RequestID())
 	r.GET("/boom", func(c *gin.Context) {
-		btpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
+		ginpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
 			"on-premise call failed", nil)
 	})
 

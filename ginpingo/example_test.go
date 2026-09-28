@@ -1,4 +1,4 @@
-package btpingo_test
+package ginpingo_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/ginpingo"
 )
 
 // Example wires the package the way the README's quick start does. It
@@ -29,13 +30,13 @@ func Example() {
 	}
 
 	r := gin.New()
-	r.Use(btpingo.RequestID())
-	api := r.Group("/api", validator.Middleware())
+	r.Use(ginpingo.RequestID())
+	api := r.Group("/api", ginpingo.JWT(validator))
 	api.GET("/ping", func(c *gin.Context) {
 		resp, err := svc.CallOnPremise(c.Request.Context(), "MY_SAP_DESTINATION",
 			http.MethodGet, "/sap/bc/ping?sap-client=100", nil, nil)
 		if err != nil {
-			btpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
+			ginpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
 				"on-premise system unreachable", err)
 			return
 		}

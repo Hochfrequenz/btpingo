@@ -5,6 +5,14 @@
 // authenticators, a typed API error envelope with request-ID
 // correlation, and transparent CSRF handshaking for mutating calls.
 //
+// This package is framework-neutral and does not import Gin. A
+// Gin-based service additionally imports
+// github.com/hochfrequenz/btpingo/ginpingo for the Gin middleware and
+// handlers (JWT validation, request ID, scope enforcement, the error
+// writer, and a generic proxy handler); a huma or other non-Gin
+// service uses this package's context helpers directly and never
+// needs that subpackage.
+//
 // # API surface
 //
 // ## Service & on-prem plumbing
@@ -13,27 +21,26 @@
 //   - [*Service.CallOnPremise], [*Service.CallOnPremiseMutating]
 //   - [OnPremCaller]                — interface handlers should depend on for reads
 //   - [OnPremMutator]               — interface handlers should depend on for writes (CSRF)
-//   - [*Service.ProxyHandler]       — Gin pass-through handler for a generic proxy route
 //   - [*Service.Authenticators]     — registry accessor for startup wiring of SSO / PP / …
 //   - [NewOnPremiseTransport], [ConnTokenProvider]
 //   - [ServiceOption], [WithUserAgent], [WithMgmtTimeout], [WithOnPremiseTimeout],
 //     [WithCSRFFetchPath], [WithDestinationCacheTTL], [WithOnPremResponseSizeLimit]
 //   - [DefaultOnPremiseTimeout], [DefaultMgmtTimeout], [DefaultUserAgent],
 //     [DefaultCSRFFetchPath], [DefaultOnPremResponseSizeLimit]
+//   - [SkipForwardedHeader]         — header filter shared with ginpingo.ProxyHandler
 //
-// ## JWT validation & middleware
+// ## JWT validation & request-scoped context
 //
-//   - [JWTValidator], [NewJWTValidator]
-//   - [*JWTValidator.Middleware], [*JWTValidator.Parse]
+//   - [JWTValidator], [NewJWTValidator], [*JWTValidator.Parse]
 //   - [ForwardedUserTokenKey]
-//   - [RequestID], [RequestIDFromContext], [ContextWithRequestID], [RequestIDHeader], [RequestIDContextKey]
-//   - [RequireScope]
+//   - [ScopesFromClaims]            — normalises the "scope" claim for a framework adapter
+//   - [RequestIDHeader], [RequestIDFromContext], [ContextWithRequestID]
+//   - [ValidRequestID], [NewRequestID] — the request-ID validation and generation a
+//     framework adapter's request-ID middleware needs
 //   - [ContextWithScopes], [ScopesFromContext], [HasScope]  — scope reads for handlers with no Gin context
-//   - [MaxBodySize], [DefaultMaxBodyBytes]
 //
 // ## Error envelope
 //
-//   - [AbortError]              — the single blessed writer for error responses
 //   - [ErrorEnvelope], [ErrorDetail], [ErrorCode]
 //   - [CodeInvalidRequest], [CodeUnauthorized], [CodeForbidden],
 //     [CodeNotFound], [CodeMethodNotAllowed], [CodeRequestTooLarge],
