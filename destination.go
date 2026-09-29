@@ -264,10 +264,11 @@ func (c *DestinationCache) Lookup(ctx context.Context, cred *DestCredentials, be
 // Invalidate drops the cached destination for (cred.URI, cred.URL,
 // cred.ClientID, name). Call this if a destination lookup's result
 // turns out to be stale in a way the TTL alone would not catch quickly
-// enough — mirrors
-// [TokenFetcher.Invalidate]'s reason for existing, though nothing in
-// this package calls it yet (a destination lookup error is not, on its
-// own, evidence that a DIFFERENT cached value is wrong).
+// enough — mirrors [TokenFetcher.Invalidate]'s reason for existing.
+// Service.CallOnPremise calls it on a 401 so a rotated destination
+// credential (e.g. a BasicAuthentication password) is looked up fresh
+// on the retry instead of serving the stale entry for up to the cache's
+// TTL.
 func (c *DestinationCache) Invalidate(cred *DestCredentials, name string) {
 	if cred == nil {
 		return

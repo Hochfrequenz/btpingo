@@ -307,11 +307,15 @@ func (s *Service) Authenticators() *AuthenticatorRegistry { return s.authenticat
 // forwards `method path` (path is appended to the destination's URL). The
 // destination token fetch and the destination lookup itself are both
 // cached (DefaultDestinationCacheTTL for the latter), so a call does
-// not pay a full Destination-service round trip every time. On a
-// 401 the connectivity token is invalidated and the call retried once,
-// because bearer tokens can expire between cache check and on-prem receipt.
-// 403 is NOT retried: it means "authenticated but not authorized", which a
-// fresh token cannot fix and re-trying would mask real auth-policy bugs.
+// not pay a full Destination-service round trip every time. On a 401
+// the connectivity token is invalidated, the cached destination is
+// dropped and looked up again, and the call is retried once — bearer
+// tokens can expire between cache check and on-prem receipt, and a
+// destination's own credentials (e.g. a BasicAuthentication password)
+// can be rotated in the cockpit, so the retry must not reuse either
+// stale value. 403 is NOT retried: it means "authenticated but not
+// authorized", which a fresh token cannot fix and re-trying would mask
+// real auth-policy bugs.
 // The returned response body must be closed by the caller.
 //
 // The returned resp.Body is capped at DefaultOnPremResponseSizeLimit
@@ -356,6 +360,16 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 	if resp.StatusCode == http.StatusUnauthorized && body == nil {
 		_ = resp.Body.Close()
 		s.tokens.Invalidate(s.env.Conn.URL, s.env.Conn.ClientID)
+		// The destination itself can be the reason for the 401 — e.g. a
+		// BasicAuthentication password rotated in the cockpit — and the
+		// cached entry would otherwise keep serving the stale credentials
+		// for up to the destination cache's TTL. Drop it and look the
+		// destination up again so the retry carries fresh credentials.
+		s.destinations.Invalidate(s.env.Dest, destName)
+		dest, err = s.destinations.Lookup(ctx, s.env.Dest, destToken, destName)
+		if err != nil {
+			return nil, fmt.Errorf("destination lookup: %w", err)
+		}
 		resp, err = s.callOnce(ctx, dest, method, pathSuffix, headers, nil)
 	}
 	return resp, err

@@ -600,3 +600,101 @@ func Test_Service_CallOnPremise_WithOnPremiseTimeout(t *testing.T) {
 			strings.Contains(err.Error(), "timeout"),
 		is.True())
 }
+
+// Test_Service_CallOnPremise_RetriesOn401WithRefreshedDestination covers
+// the fix for #4: a 401 must not only invalidate the connectivity
+// token, it must also drop the cached *destination* and look it up
+// again, because the 401 can just as well be caused by a destination
+// credential (e.g. a BasicAuthentication password) that was rotated in
+// the cockpit. Without the fix, the retry would replay the stale
+// "old" password from the cached destination and fail again.
+//
+// The fake Destination service hands back password "old" on its first
+// lookup and "new" on every lookup after that. The fake on-prem server
+// answers 401 unless the Basic-auth password is "new". The call must
+// succeed on the retry, with exactly two destination lookups and two
+// on-prem calls — one attempt with the stale destination, one with the
+// refreshed one.
+func Test_Service_CallOnPremise_RetriesOn401WithRefreshedDestination(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	var onPremCalls atomic.Int32
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onPremCalls.Add(1)
+		_, pass, _ := r.BasicAuth()
+		if pass != "new" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := destLookups.Add(1)
+		password := "new"
+		if n == 1 {
+			password = "old"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":%q}}`,
+			testkit.RedirectDest, password)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	resp, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp.Body.Close() }()
+	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusOK))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+}
+
+// Test_Service_CallOnPremise_401OnRetryIsReturned makes sure the fix
+// does not turn the single retry into a loop: if the on-prem server
+// still answers 401 after the destination was refreshed (e.g. the
+// rotation didn't fix the actual problem), CallOnPremise returns that
+// 401 response to the caller instead of retrying again. Exactly one
+// retry happens — two destination lookups, two on-prem calls.
+func Test_Service_CallOnPremise_401OnRetryIsReturned(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	var onPremCalls atomic.Int32
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onPremCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destLookups.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":"whatever"}}`,
+			testkit.RedirectDest)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	resp, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp.Body.Close() }()
+	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusUnauthorized))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+}
