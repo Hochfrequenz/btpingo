@@ -21,6 +21,14 @@ import (
 	"github.com/hochfrequenz/btpingo/internal/testkit"
 )
 
+// testOldPassword / testNewPassword stand in for a BasicAuthentication
+// password before/after a cockpit rotation, in the 401-retry tests
+// below that simulate the destination cache serving a stale one.
+const (
+	testOldPassword = "old"
+	testNewPassword = "new"
+)
+
 func Test_Service_CallOnPremise_EndToEnd(t *testing.T) {
 	s := testkit.NewBTPStack(t, `{
 		"destinationConfiguration":{
@@ -599,4 +607,232 @@ func Test_Service_CallOnPremise_WithOnPremiseTimeout(t *testing.T) {
 			strings.Contains(err.Error(), "Client.Timeout") ||
 			strings.Contains(err.Error(), "timeout"),
 		is.True())
+}
+
+// Test_Service_CallOnPremise_RetriesOn401WithRefreshedDestination covers
+// the fix for #4: a 401 must not only invalidate the connectivity
+// token, it must also drop the cached *destination* and look it up
+// again, because the 401 can just as well be caused by a destination
+// credential (e.g. a BasicAuthentication password) that was rotated in
+// the cockpit. Without the fix, the retry would replay the stale
+// "old" password from the cached destination and fail again.
+//
+// The fake Destination service hands back password "old" on its first
+// lookup and "new" on every lookup after that. The fake on-prem server
+// answers 401 unless the Basic-auth password is "new". The call must
+// succeed on the retry, with exactly two destination lookups and two
+// on-prem calls — one attempt with the stale destination, one with the
+// refreshed one.
+func Test_Service_CallOnPremise_RetriesOn401WithRefreshedDestination(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	var onPremCalls atomic.Int32
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onPremCalls.Add(1)
+		_, pass, _ := r.BasicAuth()
+		if pass != testNewPassword {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := destLookups.Add(1)
+		password := testNewPassword
+		if n == 1 {
+			password = testOldPassword
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":%q}}`,
+			testkit.RedirectDest, password)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	resp, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp.Body.Close() }()
+	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusOK))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+}
+
+// Test_Service_CallOnPremise_401OnRetryIsReturned makes sure the fix
+// does not turn the single retry into a loop: if the on-prem server
+// still answers 401 after the destination was refreshed (e.g. the
+// rotation didn't fix the actual problem), CallOnPremise returns that
+// 401 response to the caller instead of retrying again. Exactly one
+// retry happens — two destination lookups, two on-prem calls.
+func Test_Service_CallOnPremise_401OnRetryIsReturned(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	var onPremCalls atomic.Int32
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onPremCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destLookups.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":"whatever"}}`,
+			testkit.RedirectDest)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	resp, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp.Body.Close() }()
+	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusUnauthorized))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+
+	// The retry's 401 must drop the destination the retry just cached:
+	// the next call looks it up again instead of replaying a value that
+	// is known to be rejected.
+	resp2, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	_ = resp2.Body.Close()
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(4))
+}
+
+// Test_Service_CallOnPremise_BodyCarrying401DropsDestinationForNextCall
+// covers the other half of the #4 fix: a body-carrying call cannot be
+// retried within itself — its io.Reader is already consumed by the
+// failed attempt — so it must return the 401 to the caller as-is.
+// But the token and destination invalidation must still run for that
+// call, not only for retryable body-less ones, so the cache dropped
+// here is looked up fresh by the very next call on the same
+// destination instead of serving the stale, rotated-away credential
+// for the rest of the cache TTL.
+//
+// The fake Destination service hands back password "old" on its first
+// lookup and "new" on every lookup after. The fake on-prem server 401s
+// unless the Basic-auth password is "new". Call 1 is body-carrying and
+// gets the 401 back unretried: exactly one on-prem call, one
+// destination lookup. Call 2 is body-less and succeeds on its first
+// on-prem attempt because it looked the destination up again: exactly
+// two destination lookups and two on-prem calls across both calls.
+//
+// If the Invalidate calls were still nested inside the `body == nil`
+// branch (the pre-fix code CallOnPremise had), call 1 would never
+// invalidate anything, so call 2 would first replay the cached "old"
+// password, get a 401, and only succeed via its own in-call retry —
+// this test then fails on a third on-prem call instead of the
+// expected two.
+func Test_Service_CallOnPremise_BodyCarrying401DropsDestinationForNextCall(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	var onPremCalls atomic.Int32
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		onPremCalls.Add(1)
+		_, pass, _ := r.BasicAuth()
+		if pass != testNewPassword {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := destLookups.Add(1)
+		password := testNewPassword
+		if n == 1 {
+			password = testOldPassword
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":%q}}`,
+			testkit.RedirectDest, password)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	// Call 1: body-carrying, gets 401, cannot be retried in-call.
+	resp1, err := svc.CallOnPremise(context.Background(), "D", http.MethodPost, "/x", nil, bytes.NewReader([]byte("payload")))
+	then.AssertThat(t, err, is.Nil())
+	_ = resp1.Body.Close()
+	then.AssertThat(t, resp1.StatusCode, is.EqualTo(http.StatusUnauthorized))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(1))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(1))
+
+	// Call 2: body-less, on a fresh destination lookup because call 1
+	// dropped the cache — succeeds on the first on-prem attempt.
+	resp2, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	defer func() { _ = resp2.Body.Close() }()
+	then.AssertThat(t, resp2.StatusCode, is.EqualTo(http.StatusOK))
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
+	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+}
+
+// Test_Service_CallOnPremise_401RetryLookupNotFound covers the retry's
+// own error path: if the destination was deleted between the first
+// 401 and the retry (e.g. an operator removed it while chasing the
+// original outage), the second Lookup call returns
+// ErrDestinationNotFound and CallOnPremise surfaces that error rather
+// than swallowing it — so a caller feeding it to ClassifyOnPremError
+// gets OnPremFailureDestinationNotFound, not a generic transport
+// failure.
+func Test_Service_CallOnPremise_401RetryLookupNotFound(t *testing.T) {
+	s := testkit.NewBTPStack(t, "placeholder")
+
+	s.OnPrem.Close()
+	s.OnPrem = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(s.OnPrem.Close)
+
+	var destLookups atomic.Int32
+	s.Dest.Close()
+	s.Dest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := destLookups.Add(1)
+		if n >= 2 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,
+			"Authentication":"BasicAuthentication","ProxyType":"OnPremise","User":"u","Password":%q}}`,
+			testkit.RedirectDest, testOldPassword)
+	}))
+	t.Cleanup(s.Dest.Close)
+	s.Env.Dest.URI = s.Dest.URL
+
+	svc, err := btpingo.NewService(s.Env)
+	then.AssertThat(t, err, is.Nil())
+
+	_, err = svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Not(is.Nil()))
+	then.AssertThat(t, errors.Is(err, btpingo.ErrDestinationNotFound), is.True())
+
+	kind, _ := btpingo.ClassifyOnPremError(err)
+	then.AssertThat(t, kind, is.EqualTo(btpingo.OnPremFailureDestinationNotFound))
 }
