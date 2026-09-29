@@ -12,9 +12,10 @@ import (
 	"github.com/hochfrequenz/btpingo/internal/fwdheader"
 )
 
-// isMutatingMethod returns true for HTTP methods that SAP's ICF
-// typically gates with CSRF. GET / HEAD / OPTIONS are read-only and
-// pass through unaltered; everything else triggers the handshake.
+// isMutatingMethod returns true for the four HTTP methods that SAP's ICF
+// typically gates with CSRF: POST, PUT, DELETE and PATCH. Every other
+// method (GET, HEAD, OPTIONS, and extension methods such as LINK or LOCK)
+// takes the read path without the handshake.
 func isMutatingMethod(method string) bool {
 	switch strings.ToUpper(method) {
 	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
