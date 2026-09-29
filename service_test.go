@@ -705,6 +705,14 @@ func Test_Service_CallOnPremise_401OnRetryIsReturned(t *testing.T) {
 	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusUnauthorized))
 	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(2))
 	then.AssertThat(t, int(onPremCalls.Load()), is.EqualTo(2))
+
+	// The retry's 401 must drop the destination the retry just cached:
+	// the next call looks it up again instead of replaying a value that
+	// is known to be rejected.
+	resp2, err := svc.CallOnPremise(context.Background(), "D", http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	_ = resp2.Body.Close()
+	then.AssertThat(t, int(destLookups.Load()), is.EqualTo(4))
 }
 
 // Test_Service_CallOnPremise_BodyCarrying401DropsDestinationForNextCall

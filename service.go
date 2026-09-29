@@ -368,8 +368,7 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 	// this call can retry, so at least the NEXT call on this
 	// destination starts from a clean cache.
 	if resp.StatusCode == http.StatusUnauthorized {
-		s.tokens.Invalidate(s.env.Conn.URL, s.env.Conn.ClientID)
-		s.destinations.Invalidate(s.env.Dest, destName)
+		s.invalidateOn401(destName)
 	}
 	// Body may be read-once (io.Reader), so we only retry when the caller
 	// handed us nil — safer than silently draining and re-seeking. A
@@ -382,8 +381,22 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 			return nil, fmt.Errorf("destination lookup: %w", err)
 		}
 		resp, err = s.callOnce(ctx, dest, method, pathSuffix, headers, nil)
+		// The retry's lookup refilled both caches. If the retry is
+		// rejected too, those values are known bad: drop them again so
+		// they are not served to the next call. No further retry.
+		if err == nil && resp.StatusCode == http.StatusUnauthorized {
+			s.invalidateOn401(destName)
+		}
 	}
 	return resp, err
+}
+
+// invalidateOn401 drops the cached Connectivity token and the cached
+// destination after an on-prem 401, so the next attempt fetches both
+// fresh.
+func (s *Service) invalidateOn401(destName string) {
+	s.tokens.Invalidate(s.env.Conn.URL, s.env.Conn.ClientID)
+	s.destinations.Invalidate(s.env.Dest, destName)
 }
 
 // CallOnPremiseMutating is the write counterpart of CallOnPremise.
