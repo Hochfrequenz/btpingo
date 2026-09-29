@@ -727,9 +727,10 @@ func Test_Service_CallOnPremise_401OnRetryIsReturned(t *testing.T) {
 //
 // If the Invalidate calls were still nested inside the `body == nil`
 // branch (the pre-fix code CallOnPremise had), call 1 would never
-// invalidate anything, call 2 would replay the cached "old" password
-// from the destination cache, and this test would fail with a second
-// 401 instead of the expected 200.
+// invalidate anything, so call 2 would first replay the cached "old"
+// password, get a 401, and only succeed via its own in-call retry —
+// this test then fails on a third on-prem call instead of the
+// expected two.
 func Test_Service_CallOnPremise_BodyCarrying401DropsDestinationForNextCall(t *testing.T) {
 	s := testkit.NewBTPStack(t, "placeholder")
 
