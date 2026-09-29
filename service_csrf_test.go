@@ -18,6 +18,7 @@ import (
 	"github.com/corbym/gocrest/then"
 
 	"github.com/hochfrequenz/btpingo"
+	"github.com/hochfrequenz/btpingo/internal/testkit"
 )
 
 // csrfSAPServer stands in for an SAP ICF node that enforces the CSRF
@@ -86,15 +87,15 @@ func (s *csrfSAPServer) Close() { s.server.Close() }
 // newBTPStackRoutedThrough reuses newBTPStack but wires its proxy to a
 // specific onPrem (not the stack's default). Saves boilerplate in each
 // CSRF test.
-func newBTPStackRoutedThrough(t *testing.T, onPremURL string) *btpStack {
+func newBTPStackRoutedThrough(t *testing.T, onPremURL string) *testkit.BTPStack {
 	t.Helper()
-	s := newBTPStack(t, fmt.Sprintf(`{
+	s := testkit.NewBTPStack(t, fmt.Sprintf(`{
 		"destinationConfiguration":{"Name":"D","Type":"HTTP","URL":%q,"Authentication":"NoAuthentication","ProxyType":"OnPremise"}
 	}`, onPremURL))
 	// Replace the stack's proxy to forward to onPremURL directly rather
 	// than to the stack's auto-created onPrem.
-	s.proxy.Close()
-	s.proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.Proxy.Close()
+	s.Proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Proxy-Authorization"), "Bearer ") {
 			http.Error(w, "missing proxy auth", http.StatusProxyAuthRequired)
 			return
@@ -127,10 +128,10 @@ func newBTPStackRoutedThrough(t *testing.T, onPremURL string) *btpStack {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}))
-	t.Cleanup(s.proxy.Close)
-	pu, _ := url.Parse(s.proxy.URL)
-	s.env.Conn.OnPremiseProxyHost = pu.Hostname()
-	s.env.Conn.OnPremiseProxyPort = pu.Port()
+	t.Cleanup(s.Proxy.Close)
+	pu, _ := url.Parse(s.Proxy.URL)
+	s.Env.Conn.OnPremiseProxyHost = pu.Hostname()
+	s.Env.Conn.OnPremiseProxyPort = pu.Port()
 	return s
 }
 
@@ -145,7 +146,7 @@ func Test_CallOnPremiseMutating_RunsHandshakeAndAttaches(t *testing.T) {
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
 
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	resp, err := svc.CallOnPremiseMutating(context.Background(), "D", http.MethodPost,
@@ -176,7 +177,7 @@ func Test_CallOnPremiseMutating_CachesStateAcrossCalls(t *testing.T) {
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
 
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	for i := 0; i < 3; i++ {
@@ -200,7 +201,7 @@ func Test_CallOnPremiseMutating_RefetchesOnCSRFRequired(t *testing.T) {
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
 
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	// First call primes the cache with tok-old.
@@ -253,7 +254,7 @@ func Test_CallOnPremiseMutating_SurfacesRealForbidden(t *testing.T) {
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
 
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	resp, err := svc.CallOnPremiseMutating(context.Background(), "D", http.MethodPost,
@@ -314,7 +315,7 @@ func Test_CallOnPremiseMutating_SingleflightDedupesConcurrentFetches(t *testing.
 	defer sap.Close()
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	const N = 8
@@ -383,7 +384,7 @@ func Test_CallOnPremiseMutating_FetchErrors(t *testing.T) {
 		defer sap.Close()
 
 		s := newBTPStackRoutedThrough(t, sap.URL)
-		svc, err := btpingo.NewService(s.env)
+		svc, err := btpingo.NewService(s.Env)
 		then.AssertThat(t, err, is.Nil())
 
 		_, err = svc.CallOnPremiseMutating(context.Background(), "D",
@@ -403,7 +404,7 @@ func Test_CallOnPremiseMutating_FetchErrors(t *testing.T) {
 		defer sap.Close()
 
 		s := newBTPStackRoutedThrough(t, sap.URL)
-		svc, err := btpingo.NewService(s.env)
+		svc, err := btpingo.NewService(s.Env)
 		then.AssertThat(t, err, is.Nil())
 
 		_, err = svc.CallOnPremiseMutating(context.Background(), "D",
@@ -421,7 +422,7 @@ func Test_CallOnPremiseMutating_NilBody(t *testing.T) {
 	defer sap.Close()
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
-	svc, err := btpingo.NewService(s.env)
+	svc, err := btpingo.NewService(s.Env)
 	then.AssertThat(t, err, is.Nil())
 
 	resp, err := svc.CallOnPremiseMutating(context.Background(), "D",
@@ -442,7 +443,7 @@ func Test_CallOnPremiseMutating_CustomFetchPath(t *testing.T) {
 
 	s := newBTPStackRoutedThrough(t, sap.server.URL)
 
-	svc, err := btpingo.NewService(s.env, btpingo.WithCSRFFetchPath("/sap/bc/rest/zmy_service"))
+	svc, err := btpingo.NewService(s.Env, btpingo.WithCSRFFetchPath("/sap/bc/rest/zmy_service"))
 	then.AssertThat(t, err, is.Nil())
 
 	resp, err := svc.CallOnPremiseMutating(context.Background(), "D", http.MethodPost,

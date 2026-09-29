@@ -15,7 +15,7 @@ jobs:
         with:
           go-version: 1.27.x
       - name: Calc coverage
-        run: go test ./... -v -covermode=count -coverprofile=coverage.out
+        run: go test ./... -v -covermode=count -coverpkg=$(go list ./... | grep -v /internal/testkit | paste -sd, -) -coverprofile=coverage.out
       - name: Convert coverage to lcov
         uses: jandelgado/gcov2lcov-action@v1.2.0
       - name: Enforce Min Coverage

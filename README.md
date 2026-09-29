@@ -12,6 +12,11 @@ A Go client for apps on **SAP BTP Cloud Foundry** that call an **on-premise SAP 
 
 SAP's Cloud SDK covers this for Java and JavaScript only. Without it, every Go app on BTP rebuilds it.
 
+It ships as two packages:
+
+- **`btpingo`** (this module's root) — the framework-neutral core above. It does not import Gin, so a huma (or other non-Gin) service can depend on it alone.
+- **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, scope enforcement, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
+
 ```sh
 go get github.com/hochfrequenz/btpingo
 ```
@@ -34,13 +39,13 @@ if err != nil {
 }
 
 r := gin.New()
-r.Use(btpingo.RequestID())
-api := r.Group("/api", validator.Middleware())
+r.Use(ginpingo.RequestID())
+api := r.Group("/api", ginpingo.JWT(validator))
 api.GET("/ping", func(c *gin.Context) {
 	resp, err := svc.CallOnPremise(c.Request.Context(), "MY_SAP_DESTINATION",
 		http.MethodGet, "/sap/bc/ping?sap-client=100", nil, nil)
 	if err != nil {
-		btpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
+		ginpingo.AbortError(c, http.StatusBadGateway, btpingo.CodeUpstreamUnreachable,
 			"on-premise system unreachable", err)
 		return
 	}
@@ -51,7 +56,7 @@ api.GET("/ping", func(c *gin.Context) {
 
 Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
 
-The full API surface is listed in the [package documentation](https://pkg.go.dev/github.com/hochfrequenz/btpingo).
+The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
 
 ## Safety defaults
 
@@ -64,7 +69,7 @@ The full API surface is listed in the [package documentation](https://pkg.go.dev
 
 This code started as `internal/btp` in [go-sap-btp-cf-template](https://github.com/Hochfrequenz/go-sap-btp-cf-template). It is being extracted so that fixes reach every service as a dependency bump instead of being copied between forks.
 
-Until `v1.0.0` the API may change between minor versions. A breaking change is always named in the release notes. The gin-specific helpers (`Middleware`, `RequestID`, `RequireScope`, `MaxBodySize`, `AbortError`, `ProxyHandler`) are planned to move into a subpackage, so that the core can be used without gin.
+Until `v1.0.0` the API may change between minor versions. A breaking change is always named in the release notes. The gin-specific helpers (`JWT`, `RequestID`, `RequireScope`, `MaxBodySize`, `AbortError`, `ProxyHandler`) have moved into the `ginpingo` subpackage, so that the core can be used without gin.
 
 ## License
 

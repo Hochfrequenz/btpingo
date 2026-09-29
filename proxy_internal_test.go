@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/corbym/gocrest/is"
@@ -78,10 +80,12 @@ func Test_NewOnPremiseTransport_GetProxyConnectHeader_PropagatesErr(t *testing.T
 // a TLS origin to prove the header now stops at the tunnel: the CONNECT
 // itself carries it, but the tunneled request does not.
 func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
-	var gotOriginAuth, gotConnectAuth string
+	// Written by server goroutines, read by the test: atomic.Value keeps
+	// -race quiet without relying on network I/O as synchronisation.
+	var gotOriginAuth, gotConnectAuth atomic.Value
 
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotOriginAuth = r.Header.Get("Proxy-Authorization")
+		gotOriginAuth.Store(r.Header.Get("Proxy-Authorization"))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer origin.Close()
@@ -91,31 +95,39 @@ func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
 			http.Error(w, "expected CONNECT", http.StatusBadRequest)
 			return
 		}
-		gotConnectAuth = r.Header.Get("Proxy-Authorization")
+		gotConnectAuth.Store(r.Header.Get("Proxy-Authorization"))
 
 		upstream, err := net.Dial("tcp", r.Host)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, "dial failed", http.StatusBadGateway)
 			return
 		}
 		defer func() { _ = upstream.Close() }()
-		w.WriteHeader(http.StatusOK)
 
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
-			return
-		}
-		client, _, err := hj.Hijack()
+		// Hijack first and write the 200 onto the raw connection: a
+		// WriteHeader before Hijack is not guaranteed to reach the client,
+		// which then sees the tunnel close with EOF.
+		client, _, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			return
 		}
 		defer func() { _ = client.Close() }()
-		// Closing both conns on handler exit unblocks whichever io.Copy
-		// direction is still waiting on the other, so the goroutine
-		// below always ends instead of leaking past the test.
-		go func() { _, _ = io.Copy(upstream, client) }()
+		if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			return
+		}
+
+		// Relay both directions and return only when both have ended, so
+		// neither goroutine outlives the handler.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(upstream, client)
+			_ = upstream.Close()
+		}()
 		_, _ = io.Copy(client, upstream)
+		_ = client.Close()
+		wg.Wait()
 	}))
 	defer proxy.Close()
 
@@ -132,18 +144,21 @@ func Test_RoundTrip_HTTPS_DoesNotLeakProxyAuthorizationToOrigin(t *testing.T) {
 
 	inner := rt.(*onPremiseRoundTripper)
 	inner.base.TLSClientConfig = origin.Client().Transport.(*http.Transport).TLSClientConfig
+	defer inner.base.CloseIdleConnections()
 
 	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
 	then.AssertThat(t, err, is.Nil())
 	// A caller-supplied Proxy-Authorization must not survive to the
 	// origin either — RoundTrip has to strip it, not just refrain from
-	// setting its own, exercising the r.Header.Del path below.
+	// setting its own, exercising the r.Header.Del path.
 	req.Header.Set("Proxy-Authorization", "Bearer caller-supplied")
 	resp, err := rt.RoundTrip(req)
-	then.AssertThat(t, err, is.Nil())
+	if err != nil {
+		t.Fatalf("RoundTrip through the CONNECT proxy: %v", err)
+	}
 	_ = resp.Body.Close()
 
-	then.AssertThat(t, gotConnectAuth, is.EqualTo("Bearer conn-token"))
-	then.AssertThat(t, gotOriginAuth, is.EqualTo(""))
+	then.AssertThat(t, gotConnectAuth.Load(), is.EqualTo[any]("Bearer conn-token"))
+	then.AssertThat(t, gotOriginAuth.Load(), is.EqualTo[any](""))
 	then.AssertThat(t, strings.HasPrefix(origin.URL, "https://"), is.True())
 }

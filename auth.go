@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
-	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -77,69 +75,62 @@ func (v *JWTValidator) Parse(raw string) (jwt.MapClaims, error) {
 	return claims, nil
 }
 
-// Middleware enforces a valid JWT on Authorization: Bearer. The raw token is
-// stashed in the request context under ForwardedUserTokenKey{} so downstream
-// authenticators (PrincipalPropagation) can reuse it; parsed claims land in
-// the Gin context as "jwtClaims", and the token's scopes additionally land in
-// the request context for handlers that never see a *gin.Context — see
-// [ScopesFromContext].
-func (v *JWTValidator) Middleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		h := c.GetHeader("Authorization")
-		if !strings.HasPrefix(h, "Bearer ") {
-			AbortError(c, http.StatusUnauthorized, CodeUnauthorized,
-				"missing bearer token", nil)
-			return
+// ScopesFromClaims reads the "scope" claim in either XSUAA shape (an
+// array of strings) or the OAuth 2 bare-string shape
+// (whitespace-separated). Both are valid in the wild; normalising at
+// the read site keeps a strict, exact scope check (e.g.
+// ginpingo.RequireScope) from needing two near-identical code paths.
+//
+// Exported for the gin adapters (ginpingo.JWT populates
+// [ContextWithScopes] with this, and ginpingo.RequireScope reads the
+// claims by the same rule) and for any other framework adapter that
+// needs the same normalisation.
+func ScopesFromClaims(claims jwt.MapClaims) []string {
+	switch v := claims["scope"].(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			if str, ok := s.(string); ok {
+				out = append(out, str)
+			}
 		}
-		raw := strings.TrimPrefix(h, "Bearer ")
-		claims, err := v.Parse(raw)
-		if err != nil {
-			// The underlying jwt/keyfunc error can carry "kid not found",
-			// "token expired at …", etc. Those are useful for operators
-			// but not something we want on the client — log it, show a
-			// stable message with the same code.
-			AbortError(c, http.StatusUnauthorized, CodeUnauthorized,
-				"invalid or expired token", err)
-			return
-		}
-		c.Set("jwtClaims", claims)
-		ctx := context.WithValue(c.Request.Context(), ForwardedUserTokenKey{}, raw)
-		// Scopes go into the REQUEST context as well as the Gin one.
-		// RequireScope reads the Gin context and that stays as it is,
-		// but a huma operation only ever sees a context.Context — the
-		// humagin adapter hands it c.Request.Context() and nothing
-		// else. Without this line a huma handler cannot make a
-		// per-caller decision at all — e.g. reporting a capability
-		// evaluated against the caller's token rather than only
-		// against a deployment-wide switch.
-		ctx = ContextWithScopes(ctx, extractScopes(claims))
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
+		return out
+	case []string:
+		return v
+	case string:
+		// strings.Fields splits on any Unicode whitespace and drops
+		// empty entries, so double spaces / tabs / leading-trailing
+		// whitespace all Just Work.
+		return strings.Fields(v)
 	}
+	return nil
 }
 
 // scopesCtxKey is the private context key the validated token's scopes
 // are stashed under. Unexported and a struct type, so nothing outside
-// this package can collide with it or forge an entry — the only writer
-// is Middleware, after the signature has been verified.
+// this package can collide with it or forge an entry. In production,
+// ginpingo.JWT is the only writer, and only after the signature has
+// been verified; ContextWithScopes is also called directly by tests
+// and by other adapters that authenticate by some other means.
 type scopesCtxKey struct{}
 
 // ContextWithScopes returns ctx carrying the given scopes.
 //
-// [*JWTValidator.Middleware] is the only production caller, and it calls
-// this only after the signature, audience and expiry have been verified
-// — so a scope in a request context is always one XSUAA actually
-// issued. It is exported for the other two legitimate composers of such
-// a context: a handler test that needs a caller with a scope without
-// minting a JWT, and any future middleware that authenticates by some
-// other means. It is not an authorization decision; [HasScope] is.
+// [github.com/hochfrequenz/btpingo/ginpingo.JWT] is the only production
+// caller, and it calls this only after the signature, audience and
+// expiry have been verified — so a scope in a request context is
+// always one XSUAA actually issued. It is exported for the other two
+// legitimate composers of such a context: a handler test that needs a
+// caller with a scope without minting a JWT, and any future middleware
+// that authenticates by some other means. It is not an authorization
+// decision; [HasScope] is.
 func ContextWithScopes(ctx context.Context, scopes []string) context.Context {
 	return context.WithValue(ctx, scopesCtxKey{}, scopes)
 }
 
 // ScopesFromContext returns the scopes of the validated token on this
 // request, or nil when the request did not pass through
-// [*JWTValidator.Middleware].
+// [github.com/hochfrequenz/btpingo/ginpingo.JWT].
 //
 // Fail-closed by construction: an unauthenticated request, or a
 // mis-wired router that skipped the validator, yields nil and therefore
@@ -157,7 +148,8 @@ func ScopesFromContext(ctx context.Context) []string {
 // HasScope reports whether the validated token on this request carries
 // the given qualified scope (e.g. "myapp!t1234.ReadData").
 //
-// This is the huma-side counterpart of [RequireScope], which is Gin
+// This is the huma-side counterpart of
+// [github.com/hochfrequenz/btpingo/ginpingo.RequireScope], which is gin
 // middleware and can only abort. A huma handler that must REPORT a
 // capability rather than enforce it (e.g. a "may read data" flag in a
 // response) needs to ask the question without rejecting the request,
