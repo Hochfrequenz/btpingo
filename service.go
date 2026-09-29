@@ -307,15 +307,20 @@ func (s *Service) Authenticators() *AuthenticatorRegistry { return s.authenticat
 // forwards `method path` (path is appended to the destination's URL). The
 // destination token fetch and the destination lookup itself are both
 // cached (DefaultDestinationCacheTTL for the latter), so a call does
-// not pay a full Destination-service round trip every time. On a 401
-// the connectivity token is invalidated, the cached destination is
-// dropped and looked up again, and the call is retried once — bearer
-// tokens can expire between cache check and on-prem receipt, and a
-// destination's own credentials (e.g. a BasicAuthentication password)
-// can be rotated in the cockpit, so the retry must not reuse either
-// stale value. 403 is NOT retried: it means "authenticated but not
-// authorized", which a fresh token cannot fix and re-trying would mask
-// real auth-policy bugs.
+// not pay a full Destination-service round trip every time. On EVERY
+// 401 the connectivity token is invalidated and the cached destination
+// is dropped — bearer tokens can expire between cache check and
+// on-prem receipt, and a destination's own credentials (e.g. a
+// BasicAuthentication password) can be rotated in the cockpit, so
+// neither stale value should keep being served. The call itself is
+// retried only when body is nil: a body-carrying call's io.Reader is
+// already consumed by the failed attempt and cannot be safely
+// re-sent, so it returns the 401 as-is: but because the caches were
+// already dropped, the next call on this destination looks both up
+// fresh and heals itself. 403 is NOT retried and does NOT invalidate
+// either cache: it means "authenticated but not authorized", which a
+// fresh token cannot fix and re-trying would mask real
+// auth-policy bugs.
 // The returned response body must be closed by the caller.
 //
 // The returned resp.Body is capped at DefaultOnPremResponseSizeLimit
@@ -355,17 +360,23 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 	if err != nil {
 		return nil, err
 	}
+	// A 401 means the connectivity token, the destination's own
+	// credentials, or both are stale — e.g. a BasicAuthentication
+	// password rotated in the cockpit — and the cached entries would
+	// otherwise keep serving the stale values for up to their
+	// respective TTLs. Drop both on every 401, regardless of whether
+	// this call can retry, so at least the NEXT call on this
+	// destination starts from a clean cache.
+	if resp.StatusCode == http.StatusUnauthorized {
+		s.tokens.Invalidate(s.env.Conn.URL, s.env.Conn.ClientID)
+		s.destinations.Invalidate(s.env.Dest, destName)
+	}
 	// Body may be read-once (io.Reader), so we only retry when the caller
-	// handed us nil — safer than silently draining and re-seeking.
+	// handed us nil — safer than silently draining and re-seeking. A
+	// body-carrying call that gets a 401 returns it as-is; the cache
+	// invalidation above still lets the next call heal itself.
 	if resp.StatusCode == http.StatusUnauthorized && body == nil {
 		_ = resp.Body.Close()
-		s.tokens.Invalidate(s.env.Conn.URL, s.env.Conn.ClientID)
-		// The destination itself can be the reason for the 401 — e.g. a
-		// BasicAuthentication password rotated in the cockpit — and the
-		// cached entry would otherwise keep serving the stale credentials
-		// for up to the destination cache's TTL. Drop it and look the
-		// destination up again so the retry carries fresh credentials.
-		s.destinations.Invalidate(s.env.Dest, destName)
 		dest, err = s.destinations.Lookup(ctx, s.env.Dest, destToken, destName)
 		if err != nil {
 			return nil, fmt.Errorf("destination lookup: %w", err)
