@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // doThroughGuard runs one request through contentLengthGuard(handler) via
@@ -249,6 +250,50 @@ func guardAborts(t *testing.T, h http.Handler, method string) (aborted bool) {
 	}()
 	contentLengthGuard(h).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, "/", nil))
 	return false
+}
+
+// Test_clGuardWriter_Flush_DeliversIncrementally proves Flush reaches the
+// connection: the first event must arrive while the handler is still
+// blocked, not only once it returns.
+func Test_clGuardWriter_Flush_DeliversIncrementally(t *testing.T) {
+	release := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+		_, _ = io.WriteString(w, "data: second\n\n")
+	})
+	ts := httptest.NewServer(contentLengthGuard(h))
+	t.Cleanup(ts.Close)
+	defer close(release)
+
+	first := make(chan string, 1)
+	go func() {
+		resp, err := ts.Client().Get(ts.URL)
+		if err != nil {
+			first <- "error: " + err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		s := bufio.NewScanner(resp.Body)
+		if !s.Scan() {
+			first <- "no line"
+			return
+		}
+		first <- s.Text()
+	}()
+	select {
+	case got := <-first:
+		if got != "data: first" {
+			t.Fatalf("first line = %q, want %q", got, "data: first")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first event not delivered while the handler was still running; Flush did not reach the connection")
+	}
 }
 
 func Test_contentLengthGuard_AbortDecision(t *testing.T) {

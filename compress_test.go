@@ -129,21 +129,18 @@ func newMuxServer(t *testing.T) *httptest.Server {
 		_, _ = w.Write(bigJSONBody)
 	})
 
-	mux.HandleFunc("/not-found-probe", http.NotFound)
-
 	srv := httptest.NewServer(btpingo.CompressHandler(mux))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 // newMuxServerCompressEverything is newMuxServer's handler but wrapped
-// with gzhttp's MinSize forced to 0 (still going through the same
-// contentLengthGuard-free comparison the template used for this specific
-// case), so every response — including ones below the default 1 KiB
-// threshold — is a candidate for compression. It exists solely to prove
-// that a route's already-small 404 body survives being run through
-// compression forced on, not just left alone because it was too small to
-// bother with.
+// with gzhttp's MinSize forced to 0. It bypasses CompressHandler and
+// exercises gzhttp itself with MinSize(0), so every response — including
+// ones below the default 1 KiB threshold — is a candidate for
+// compression. It exists solely to prove that a route's already-small
+// 404 body survives being run through compression forced on, not just
+// left alone because it was too small to bother with.
 func newMuxServerCompressEverything(t *testing.T, r http.Handler) *httptest.Server {
 	t.Helper()
 	wrap, err := gzhttp.NewWrapper(gzhttp.MinSize(0))
@@ -498,7 +495,7 @@ func Test_CompressHandler_PartialContent_PassedThroughIdentical(t *testing.T) {
 // Test_CompressHandler_304_ContentLengthNotFlaggedTruncated proves the
 // composed wrapper (gzhttp + contentLengthGuard) does not mistake a 304's
 // echoed Content-Length for a body the handler owed but didn't write.
-func Test_CompressHandler_304_ContentLengthEchoed(t *testing.T) {
+func Test_CompressHandler_304_NoBody(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cached", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "12345")
@@ -698,7 +695,15 @@ func Test_CompressHandler_OverlongHandler_AbortsInsteadOfExtraBytes(t *testing.T
 func Test_CompressHandler_Hijack_Works(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hijack", func(w http.ResponseWriter, _ *http.Request) {
-		conn, bw, err := http.NewResponseController(w).Hijack()
+		// Direct assertion, as gin's c.Writer.Hijack() does:
+		// http.NewResponseController would fall back through Unwrap and
+		// hide a missing clGuardWriter.Hijack.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "ResponseWriter does not implement http.Hijacker", http.StatusInternalServerError)
+			return
+		}
+		conn, bw, err := hj.Hijack()
 		if err != nil {
 			http.Error(w, "hijack failed", http.StatusInternalServerError)
 			return
@@ -780,6 +785,66 @@ func Test_CompressHandler_CloseNotify_Works(t *testing.T) {
 		}
 	case <-time.After(6 * time.Second):
 		t.Fatalf("handler never observed the client disconnect")
+	}
+}
+
+// Test_CompressHandler_GzipFlush_DeliversIncrementally is
+// Test_clGuardWriter_Flush_DeliversIncrementally's companion through the
+// full CompressHandler wrapper with Accept-Encoding: gzip, proving gzhttp
+// itself flushes compressed data onto the connection rather than buffering
+// it until the handler returns: the first event must decode while the
+// handler is still blocked, not only afterwards.
+func Test_CompressHandler_GzipFlush_DeliversIncrementally(t *testing.T) {
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gzip-stream", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+		_, _ = io.WriteString(w, "data: second\n\n")
+	})
+	srv := httptest.NewServer(btpingo.CompressHandler(mux))
+	t.Cleanup(srv.Close)
+	defer close(release)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/gzip-stream", nil)
+	req.Header.Set("Accept-Encoding", gzipEncoding)
+
+	first := make(chan string, 1)
+	go func() {
+		resp, err := noAutoDecompressClient(srv).Do(req)
+		if err != nil {
+			first <- "error: " + err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.Header.Get("Content-Encoding") != gzipEncoding {
+			first <- "error: response was not gzip-encoded"
+			return
+		}
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			first <- "error: gzip.NewReader: " + err.Error()
+			return
+		}
+		s := bufio.NewScanner(zr)
+		if !s.Scan() {
+			first <- "no line"
+			return
+		}
+		first <- s.Text()
+	}()
+	select {
+	case got := <-first:
+		if got != "data: first" {
+			t.Fatalf("first line = %q, want %q", got, "data: first")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first event not delivered while the handler was still running; gzhttp's Flush did not reach the connection")
 	}
 }
 

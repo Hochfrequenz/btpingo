@@ -64,9 +64,7 @@ The full API surface is listed in the package documentation: [`btpingo`](https:/
 srv := &http.Server{Handler: btpingo.CompressHandler(router)}
 ```
 
-`CompressHandler` wraps any `http.Handler` (a `*gin.Engine`, a huma mux, or a plain `http.ServeMux`) with gzip/zstd response compression, negotiated per request via `Accept-Encoding`. It moved here from [go-sap-btp-cf-template](https://github.com/Hochfrequenz/go-sap-btp-cf-template) so every consumer gets one shared, tested copy.
-
-It also closes a Content-Length mismatch gap compression would otherwise introduce: without a guard, a handler that writes fewer or more bytes than its declared `Content-Length` (e.g. a proxied on-prem response whose connection drops mid-copy) would reach the client as a clean, fully-decodable response that is silently short or long, instead of the broken connection an uncompressed response of the same shape would produce. `CompressHandler` detects the mismatch and aborts the connection instead.
+`CompressHandler` wraps any `http.Handler` with gzip/zstd response compression, negotiated via `Accept-Encoding`. If a handler writes fewer or more bytes than its declared `Content-Length` (e.g. a proxied on-prem response cut off mid-copy), it aborts the connection instead of sending a cleanly compressed short or long body.
 
 ## Safety defaults
 

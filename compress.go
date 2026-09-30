@@ -16,12 +16,16 @@ import (
 // Content-Length guard that closes a truncation/overflow gap compression
 // would otherwise introduce (see contentLengthGuard).
 //
-// It moved here from github.com/hochfrequenz/go-sap-btp-cf-template (its
-// PR #143 and follow-ups) so every consumer gets one shared, tested copy
-// instead of a hand-copied wrapper per service. Because it operates on
-// plain http.Handler/http.ResponseWriter, it works the same whether the
-// wrapped handler is a *gin.Engine, a huma mux, or an http.ServeMux — and
-// it keeps this package gin-free.
+// Because it operates on plain http.Handler/http.ResponseWriter, it works
+// the same whether the wrapped handler is a *gin.Engine, a huma mux, or an
+// http.ServeMux — and it keeps this package gin-free.
+//
+// If the wrapped handler writes a different number of body bytes than
+// the Content-Length it declared, CompressHandler logs one line at Error
+// level on the default slog logger and aborts the connection with
+// panic(http.ErrAbortHandler), so the client sees an unexpected EOF
+// instead of a clean short or overlong response. A recover middleware
+// placed around CompressHandler must re-panic http.ErrAbortHandler.
 //
 // Usage:
 //
