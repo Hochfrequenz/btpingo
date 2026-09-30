@@ -58,6 +58,16 @@ Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes 
 
 The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
 
+## Response compression
+
+```go
+srv := &http.Server{Handler: btpingo.CompressHandler(router)}
+```
+
+`CompressHandler` wraps any `http.Handler` (a `*gin.Engine`, a huma mux, or a plain `http.ServeMux`) with gzip/zstd response compression, negotiated per request via `Accept-Encoding`. It moved here from [go-sap-btp-cf-template](https://github.com/Hochfrequenz/go-sap-btp-cf-template) so every consumer gets one shared, tested copy.
+
+It also closes a Content-Length mismatch gap compression would otherwise introduce: without a guard, a handler that writes fewer or more bytes than its declared `Content-Length` (e.g. a proxied on-prem response whose connection drops mid-copy) would reach the client as a clean, fully-decodable response that is silently short or long, instead of the broken connection an uncompressed response of the same shape would produce. `CompressHandler` detects the mismatch and aborts the connection instead.
+
 ## Safety defaults
 
 - **Host pin:** an on-premise request always goes to the destination's own scheme and host. A path suffix, an authenticator or a redirect cannot steer it elsewhere. Redirects are followed only while they stay on that origin.

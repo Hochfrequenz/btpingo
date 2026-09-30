@@ -7,6 +7,7 @@ require (
 	github.com/corbym/gocrest v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/klauspost/compress v1.20.1
 	golang.org/x/sync v0.23.0
 )
 
