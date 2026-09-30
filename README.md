@@ -58,6 +58,14 @@ Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes 
 
 The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
 
+## Response compression
+
+```go
+srv := &http.Server{Handler: btpingo.CompressHandler(router)}
+```
+
+`CompressHandler` wraps any `http.Handler` with response compression. A response is compressed with zstd or gzip only when the request's `Accept-Encoding` accepts one of them by q-value (zstd preferred on a tie); a request with no `Accept-Encoding`, one that excludes both, or a body under the minimum size is sent uncompressed. If a handler writes fewer or more bytes than its declared `Content-Length` (e.g. a proxied on-prem response cut off mid-copy), it aborts the connection instead of sending a cleanly compressed short or long body.
+
 ## Safety defaults
 
 - **Host pin:** an on-premise request always goes to the destination's own scheme and host. A path suffix, an authenticator or a redirect cannot steer it elsewhere. Redirects are followed only while they stay on that origin.

@@ -72,6 +72,11 @@
 //   - [ErrDestinationNotFound], [ErrNotInCloudFoundry]
 //   - [ErrOnPremResponseTooLarge], [ErrOnPremCrossOriginRedirect]
 //
+// ## Response compression
+//
+//   - [CompressHandler] — wraps an http.Handler with gzip/zstd response
+//     compression and a Content-Length guard; srv.Handler = CompressHandler(router)
+//
 // ## On-prem failure classification
 //
 //   - [OnPremFailureKind] — typed classifier; stable wire format
