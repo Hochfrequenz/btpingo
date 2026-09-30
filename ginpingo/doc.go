@@ -12,6 +12,7 @@
 //   - [ClaimsContextKey] — the Gin context key JWT stashes claims under, read by RequireScope
 //   - [RequestID], [RequestIDContextKey] — request-ID middleware and its Gin context key
 //   - [MaxBodySize], [DefaultMaxBodyBytes] — per-request body size cap
+//   - [Gzip], [GzipOption], [WithGzipMinLength], [DefaultGzipMinLength] — response gzip compression
 //   - [RequireScope]     — aborts with 403 unless the validated JWT carries a scope
 //   - [AbortError]       — the single blessed writer for error responses
 //   - [ProxyHandler]     — Gin pass-through handler for a generic proxy route

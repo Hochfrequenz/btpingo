@@ -15,7 +15,7 @@ SAP's Cloud SDK covers this for Java and JavaScript only. Without it, every Go a
 It ships as two packages:
 
 - **`btpingo`** (this module's root) — the framework-neutral core above. It does not import Gin, so a huma (or other non-Gin) service can depend on it alone.
-- **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, scope enforcement, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
+- **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, scope enforcement, response gzip compression, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
 
 ```sh
 go get github.com/hochfrequenz/btpingo
@@ -55,6 +55,14 @@ api.GET("/ping", func(c *gin.Context) {
 ```
 
 Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
+
+Add gzip compression for clients that send `Accept-Encoding: gzip`:
+
+```go
+r.Use(ginpingo.Gzip()) // default minimum: 1 KiB, see ginpingo.DefaultGzipMinLength
+```
+
+It skips bodies below the minimum size, HEAD requests, and any response that already carries a `Content-Encoding` header (relevant for `ProxyHandler`, which can relay an already-gzipped on-premise body unchanged), and it keeps `c.DataFromReader`/streaming responses flowing instead of buffering them whole.
 
 The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
 
