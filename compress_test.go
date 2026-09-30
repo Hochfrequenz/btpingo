@@ -688,6 +688,56 @@ func Test_CompressHandler_OverlongHandler_AbortsInsteadOfExtraBytes(t *testing.T
 	})
 }
 
+// Test_CompressHandler_NoWriteHandler_AbortsInsteadOfCleanEmptyResponse
+// wires the exact production Handler for the gap the implicit-200 latch
+// closes: a handler that sets a non-zero Content-Length and then returns
+// without ever calling Write or WriteHeader. net/http (and gzhttp above
+// it) would otherwise commit a clean, empty 200 for that declared
+// length — the client must see an error/EOF instead, exactly like the
+// already-covered explicit truncation case.
+func Test_CompressHandler_NoWriteHandler_AbortsInsteadOfCleanEmptyResponse(t *testing.T) {
+	const declared = 4096
+
+	newNoWriteHandler := func() http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Length", strconv.Itoa(declared))
+			// deliberately no Write, no WriteHeader
+		}
+	}
+
+	for _, tc := range []struct {
+		name           string
+		acceptEncoding string
+	}{
+		{"with Accept-Encoding gzip", gzipEncoding},
+		{"without Accept-Encoding", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/nowrite", newNoWriteHandler())
+			srv := httptest.NewServer(btpingo.CompressHandler(mux))
+			t.Cleanup(srv.Close)
+			client := noAutoDecompressClient(srv)
+
+			req, _ := http.NewRequest(http.MethodGet, srv.URL+"/nowrite", nil)
+			if tc.acceptEncoding != "" {
+				req.Header.Set("Accept-Encoding", tc.acceptEncoding)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				// The connection was aborted before headers/trailer
+				// completed — an acceptable failure shape too.
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if body, err := io.ReadAll(resp.Body); err == nil {
+				t.Fatalf("expected a read error (aborted zero-byte-vs-declared-length response), got a clean %d-byte read", len(body))
+			}
+		})
+	}
+}
+
 // Test_CompressHandler_Hijack_Works proves a websocket-upgrade-style
 // handler that hijacks the connection still works through the full
 // CompressHandler wrapper, both with and without Accept-Encoding (gzhttp

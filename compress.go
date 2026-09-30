@@ -12,9 +12,15 @@ import (
 )
 
 // CompressHandler wraps h with response compression at the net/http
-// level: gzip or zstd, negotiated per request via Accept-Encoding, plus a
-// Content-Length guard that closes a truncation/overflow gap compression
-// would otherwise introduce (see contentLengthGuard).
+// level, plus a Content-Length guard that closes a truncation/overflow
+// gap compression would otherwise introduce (see contentLengthGuard).
+//
+// A response is compressed with zstd or gzip only when the request's
+// Accept-Encoding accepts one of them by q-value (zstd is preferred when
+// both are equally acceptable — gzhttp's PreferZstd default). A request
+// with no Accept-Encoding header, one that excludes both (e.g.
+// "gzip;q=0, zstd;q=0"), or a response body under gzhttp's minimum size
+// or of a skip-listed content type is sent uncompressed instead.
 //
 // Because it operates on plain http.Handler/http.ResponseWriter, it works
 // the same whether the wrapped handler is a *gin.Engine, a huma mux, or an
@@ -89,6 +95,28 @@ func contentLengthGuard(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g := &clGuardWriter{ResponseWriter: w, want: -1, ctx: r.Context()}
 		h.ServeHTTP(g, r)
+		if g.hijacked {
+			// After a successful Hijack the handler owns the raw
+			// connection directly; g.want/g.written no longer describe
+			// what reached the client (the handler writes past this
+			// wrapper entirely, as the Hijack test does), so the guard
+			// must never inspect or act on them here. Skipping
+			// unconditionally — not just when wroteHeader is false —
+			// also covers a handler that set Content-Length and called
+			// WriteHeader before hijacking: the guard must still never
+			// panic on that connection.
+			return
+		}
+		if !g.wroteHeader {
+			// The handler returned having only set headers (e.g.
+			// Content-Length) without ever calling Write or
+			// WriteHeader. net/http commits an implicit 200 the moment
+			// ServeHTTP returns, so latch it here the same way an
+			// explicit WriteHeader(200) would, instead of leaving
+			// g.want at -1 and letting a zero-byte short response pass
+			// unnoticed.
+			g.WriteHeader(http.StatusOK)
+		}
 		if r.Method != http.MethodHead && g.want >= 0 && g.written != g.want {
 			// net/http logs nothing for ErrAbortHandler and the access log
 			// still says 200, so this line is the operator's only signal.
@@ -109,6 +137,7 @@ type clGuardWriter struct {
 	http.ResponseWriter
 	want, written int64
 	wroteHeader   bool
+	hijacked      bool
 	ctx           context.Context
 }
 
@@ -165,7 +194,16 @@ func (w *clGuardWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush mirrors Write's own implicit-header latch: a handler may stream a
+// body via Flush alone (e.g. after setting Content-Length) without ever
+// calling Write or WriteHeader itself, and without this the guard's
+// end-of-handler check would still see wroteHeader == false and want ==
+// -1, missing a short response the same way an unflushed, never-written
+// handler does.
 func (w *clGuardWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -179,7 +217,14 @@ func (w *clGuardWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // CloseNotify panics with "interface conversion" once wrapped by this
 // guard.
 func (w *clGuardWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return http.NewResponseController(w.ResponseWriter).Hijack()
+	conn, bw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil {
+		// From here the handler owns the raw connection; contentLengthGuard
+		// must not run its end-of-handler Content-Length check against
+		// this writer any more (see the g.hijacked check there).
+		w.hijacked = true
+	}
+	return conn, bw, err
 }
 
 // CloseNotify is derived from the request context rather than delegated:

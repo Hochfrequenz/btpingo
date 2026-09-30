@@ -18,9 +18,11 @@ package btpingo
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -296,6 +298,76 @@ func Test_clGuardWriter_Flush_DeliversIncrementally(t *testing.T) {
 	}
 }
 
+// Test_contentLengthGuard_HijackAfterContentLength_NoAbort proves that a
+// handler which sets Content-Length and then hijacks the connection
+// (writing its own raw response directly on the hijacked conn, never
+// going through clGuardWriter.Write or WriteHeader) is exempt from the
+// end-of-handler Content-Length check. It deliberately does not call
+// WriteHeader before hijacking: that would commit the guard's own
+// Content-Length: 100 header to the wire ahead of the handler's own raw
+// response, corrupting the framing regardless of the guard's fix — the
+// realistic hijack case (and gin's c.Writer.Hijack()) is "set headers,
+// then hijack before anything is flushed."
+//
+// Without the g.hijacked exemption in contentLengthGuard, g.want (100)
+// would never equal g.written (0, since the hijacked write bypasses the
+// guard entirely) and the guard would call panic(http.ErrAbortHandler)
+// on a connection it no longer owns. By the time that runs, the
+// hijacking handler in this test has already written its own complete,
+// correct response and closed the connection, so the client-visible
+// symptom is not a broken read — it is the operator-facing false-positive
+// ERROR log this guard exists to be trustworthy for (see
+// contentLengthGuard's doc comment: "the operator's only signal"), which
+// this test also asserts never fires.
+func Test_contentLengthGuard_HijackAfterContentLength_NoAbort(t *testing.T) {
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "not a hijacker", http.StatusInternalServerError)
+			return
+		}
+		conn, bw, err := hj.Hijack()
+		if err != nil {
+			http.Error(w, "hijack failed", http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = bw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhijacked")
+		_ = bw.Flush()
+	})
+
+	ts := httptest.NewServer(contentLengthGuard(h))
+	t.Cleanup(ts.Close)
+
+	resp, err := ts.Client().Get(ts.URL)
+	if err != nil {
+		t.Fatalf("request through a hijacking handler: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read hijacked body: %v", err)
+	}
+	if string(body) != "hijacked" {
+		t.Fatalf("body = %q, want %q", body, "hijacked")
+	}
+	// The panic itself is recovered by net/http's own hijacked-aware
+	// server loop before it can break the already-completed client read,
+	// so the log line is this test's real oracle: it must never claim a
+	// mismatch that never happened on a connection this guard no longer
+	// has any business inspecting.
+	if strings.Contains(logs.String(), "aborting connection") {
+		t.Fatalf("guard logged an aborting-connection error for a hijacked connection: %s", logs.String())
+	}
+}
+
 func Test_contentLengthGuard_AbortDecision(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -336,6 +408,43 @@ func Test_contentLengthGuard_AbortDecision(t *testing.T) {
 		{"full write", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Length", "3")
 			_, _ = io.WriteString(w, "abc")
+		}, false},
+		{"Content-Length set, no Write, no WriteHeader", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
+			// net/http commits an implicit 200 the moment ServeHTTP
+			// returns with nothing written at all. Without the
+			// end-of-handler implicit latch, g.want stays -1 forever
+			// and this zero-byte short response sails through
+			// unnoticed.
+			w.Header().Set("Content-Length", "200")
+		}, true},
+		{"Content-Length set, Flush only", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
+			// A handler that only ever Flushes (no Write, no explicit
+			// WriteHeader) must still have its declared Content-Length
+			// latched by the first Flush, the same way Write does.
+			w.Header().Set("Content-Length", "200")
+			w.(http.Flusher).Flush()
+		}, true},
+		{"Content-Length 0, nothing written", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
+			// The implicit-200 latch must not misfire on the
+			// legitimately empty case: Content-Length: 0 with nothing
+			// written is a full write, not a short one.
+			w.Header().Set("Content-Length", "0")
+		}, false},
+		{"Flush latches Content-Length before it can change", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
+			// Flush must latch "want" from the Content-Length that is
+			// actually on the wire at flush time (50), the same way
+			// WriteHeader/Write do — not leave wroteHeader false so a
+			// later, unrelated header mutation and the eventual first
+			// Write() latch onto a stale/changed value instead. If
+			// Flush does not latch here, the later Write's own
+			// existing latch fires using Content-Length: 999 (set
+			// after the flush already committed 50 to the client),
+			// which would then wrongly flag this genuinely full,
+			// correctly-sized 50-byte response as a mismatch.
+			w.Header().Set("Content-Length", "50")
+			w.(http.Flusher).Flush()
+			w.Header().Set("Content-Length", "999")
+			_, _ = io.WriteString(w, strings.Repeat("z", 50))
 		}, false},
 		{"no Content-Length", http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, "abc")
