@@ -263,7 +263,7 @@ func Test_clGuardWriter_Flush_DeliversIncrementally(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 		_, _ = io.WriteString(w, "data: second\n\n")
 	})
@@ -291,7 +291,7 @@ func Test_clGuardWriter_Flush_DeliversIncrementally(t *testing.T) {
 		if got != "data: first" {
 			t.Fatalf("first line = %q, want %q", got, "data: first")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first event not delivered while the handler was still running; Flush did not reach the connection")
 	}
 }

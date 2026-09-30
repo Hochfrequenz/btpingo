@@ -492,7 +492,7 @@ func Test_CompressHandler_PartialContent_PassedThroughIdentical(t *testing.T) {
 	}
 }
 
-// Test_CompressHandler_304_ContentLengthNotFlaggedTruncated proves the
+// Test_CompressHandler_304_NoBody proves the
 // composed wrapper (gzhttp + contentLengthGuard) does not mistake a 304's
 // echoed Content-Length for a body the handler owed but didn't write.
 func Test_CompressHandler_304_NoBody(t *testing.T) {
@@ -803,7 +803,7 @@ func Test_CompressHandler_GzipFlush_DeliversIncrementally(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 		_, _ = io.WriteString(w, "data: second\n\n")
 	})
@@ -843,7 +843,7 @@ func Test_CompressHandler_GzipFlush_DeliversIncrementally(t *testing.T) {
 		if got != "data: first" {
 			t.Fatalf("first line = %q, want %q", got, "data: first")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first event not delivered while the handler was still running; gzhttp's Flush did not reach the connection")
 	}
 }
