@@ -15,7 +15,7 @@ SAP's Cloud SDK covers this for Java and JavaScript only. Without it, every Go a
 It ships as two packages:
 
 - **`btpingo`** (this module's root) — the framework-neutral core above. It does not import Gin, so a huma (or other non-Gin) service can depend on it alone.
-- **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, scope enforcement, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
+- **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, `BindStrictJSON`, scope enforcement, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
 
 ```sh
 go get github.com/hochfrequenz/btpingo
@@ -57,6 +57,24 @@ api.GET("/ping", func(c *gin.Context) {
 Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
 
 The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
+
+## ginpingo
+
+`BindStrictJSON(c, &dst, opts...)` decodes exactly one JSON value, allowing only whitespace after it. It returns `false` after calling `AbortError` on failure, so handlers should return immediately:
+
+```go
+var input struct {
+	Name string `json:"name"`
+}
+if !ginpingo.BindStrictJSON(c, &input,
+	ginpingo.WithMaxBytes(64<<10),
+	ginpingo.WithDisallowUnknownFields(),
+) {
+	return
+}
+```
+
+The default limit is `DefaultMaxBodyBytes` (1 MiB); `WithMaxBytes` sets a per-call limit without overriding a smaller `MaxBodySize` middleware limit. Overflow yields 413 `CodeRequestTooLarge`. Empty, malformed, type-mismatched, or trailing JSON yields 400 `CodeInvalidRequest`; `WithDisallowUnknownFields` also rejects unknown struct fields. Client messages are stable and generic; underlying errors are logged server-side via `AbortError`. Binding-tag validation is not performed.
 
 ## Response compression
 

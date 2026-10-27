@@ -69,6 +69,8 @@ const DefaultMaxBodyBytes int64 = 1 << 20
 //     case since the client is already misbehaving on transport, and
 //     the important property — the body never grows past `limit` bytes
 //     in memory — holds either way.
+//     BindStrictJSON instead maps the read failure to 413, including
+//     when this middleware installed the tighter limit.
 //
 // CF's per-app memory quota is 128 MiB, so without this an
 // authenticated caller can flatten a backend with a single 100 MiB POST.
