@@ -84,4 +84,28 @@
 //     [OnPremFailureTimeout], [OnPremFailureCanceled], [OnPremFailureTransport]
 //   - [ClassifyOnPremError] — (kind, detail) for huma 502 envelopes (err path)
 //   - [OnPremNon2xxDetail] — stable detail string for the non-2xx-from-SAP path
+//
+// # Conservative retries
+//
+// [Retry] wraps read-only calls with [RetryPolicy]: by default, at most two
+// attempts separated by a jittered 100–200ms wait. [Retryable] permits only
+// plain transport errors and HTTP 502/503. Timeouts and HTTP 504 are excluded
+// because another attempt doubles latency and adds load to an already slow
+// upstream. Cancellation, missing destinations, oversized responses, and all
+// other statuses (including 401/403) are returned without retrying. The
+// service's existing credential and CSRF retries are unchanged.
+//
+// Use [RetryMutating] for writes: it makes only one attempt unless
+// RetryPolicy.Idempotent is explicitly true. A transport failure may happen
+// after a mutation was applied; buffering its body does not make replay safe.
+// The callback must rebuild any request body on every attempt and honor its
+// context. Retry closes discarded response bodies; callers close the final
+// body. RetryPolicy.Clock accepts an After(time.Duration) channel clock for
+// tests without real sleeps.
+//
+// Retry does not parse application error codes or consume response bodies.
+// Application failures returned under statuses other than 502/503 are not
+// retried. Callers with application-specific failure signals must handle
+// those before opting into a retry; they must not present them as plain
+// transport errors.
 package btpingo
