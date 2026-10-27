@@ -35,7 +35,7 @@ func Retryable(resp *http.Response, err error) bool {
 		kind, _ := ClassifyOnPremError(err)
 		var netErr net.Error
 		return resp == nil && kind == OnPremFailureTransport &&
-			!(errors.As(err, &netErr) && netErr.Timeout())
+			(!errors.As(err, &netErr) || !netErr.Timeout())
 	}
 	return resp != nil && (resp.StatusCode == http.StatusBadGateway ||
 		resp.StatusCode == http.StatusServiceUnavailable)

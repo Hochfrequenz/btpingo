@@ -151,9 +151,14 @@ func TestRetryRebuildsBodyAndPreservesFinalResponse(t *testing.T) {
 	discarded := &retryBody{Reader: strings.NewReader("unavailable")}
 	finalBody := &retryBody{Reader: strings.NewReader("ok")}
 	final := &http.Response{StatusCode: http.StatusOK, Body: finalBody}
-	defer final.Body.Close()
+	t.Cleanup(func() {
+		if err := final.Body.Close(); err != nil {
+			t.Errorf("close final response body: %v", err)
+		}
+	})
 	calls := 0
-	ctx := context.WithValue(context.Background(), struct{}{}, "request")
+	type retryContextKey struct{}
+	ctx := context.WithValue(context.Background(), retryContextKey{}, "request")
 	resp, err := btpingo.Retry(ctx, btpingo.RetryPolicy{MaxAttempts: 4, Clock: clock}, func(gotCtx context.Context) (*http.Response, error) {
 		if gotCtx != ctx {
 			t.Fatal("callback context changed")
