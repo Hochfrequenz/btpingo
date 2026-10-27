@@ -191,7 +191,8 @@ func TestRetryRebuildsBodyAndPreservesFinalResponse(t *testing.T) {
 }
 
 func TestRetryCancellation(t *testing.T) {
-	for _, phase := range []string{"before call", "during call", "during successful call", "during wait", "ready clock"} {
+	const duringSuccess = "during successful call"
+	for _, phase := range []string{"before call", "during call", duringSuccess, "during wait", "ready clock"} {
 		t.Run(phase, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -215,10 +216,10 @@ func TestRetryCancellation(t *testing.T) {
 			resp, err := btpingo.Retry(ctx, btpingo.RetryPolicy{Clock: clock}, func(context.Context) (*http.Response, error) {
 				calls++
 				status := http.StatusServiceUnavailable
-				if phase == "during successful call" {
+				if phase == duringSuccess {
 					status = http.StatusOK
 				}
-				if phase == "during call" || phase == "during successful call" {
+				if phase == "during call" || phase == duringSuccess {
 					cancel()
 				}
 				return &http.Response{StatusCode: status, Body: body}, nil
@@ -226,6 +227,13 @@ func TestRetryCancellation(t *testing.T) {
 			wantCalls := 1
 			if phase == "before call" {
 				wantCalls = 0
+			}
+			if phase == duringSuccess {
+				// A final (non-retryable) outcome is returned unchanged and its body left open.
+				if resp == nil || resp.StatusCode != http.StatusOK || err != nil || calls != 1 || body.closes != 0 {
+					t.Fatalf("result = %v, %v; calls = %d, closes = %d", resp, err, calls, body.closes)
+				}
+				return
 			}
 			if resp != nil || err != context.Canceled || calls != wantCalls || body.closes != wantCalls {
 				t.Fatalf("result = %v, %v; calls = %d, closes = %d", resp, err, calls, body.closes)

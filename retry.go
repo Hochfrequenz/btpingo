@@ -48,7 +48,8 @@ func Retryable(resp *http.Response, err error) bool {
 // Each invocation must rebuild its request body; an io.Reader is read-once.
 // The final response and error are returned unchanged, and the caller owns
 // that response body. Discarded bodies are closed before waiting. If ctx is
-// done, Retry closes any discarded response and returns nil, ctx.Err().
+// done before a retry would start, Retry closes the discarded response and
+// returns nil, ctx.Err(); a final outcome is never replaced by ctx.Err().
 // fn must honor ctx so cancellation can interrupt an in-flight call.
 //
 // HTTP 401/403 are not retried here; the service's cache/CSRF retries remain
@@ -69,14 +70,16 @@ func Retry(ctx context.Context, p RetryPolicy, fn func(context.Context) (*http.R
 			return nil, err
 		}
 		resp, err := fn(ctx)
-		ctxErr := ctx.Err()
-		if ctxErr == nil && (attempt >= p.MaxAttempts || !Retryable(resp, err)) {
+		if attempt >= p.MaxAttempts || !Retryable(resp, err) {
+			// A final outcome is returned as-is even if ctx was canceled
+			// meanwhile: dropping a completed response would hide whether
+			// the upstream call (possibly a mutation) actually succeeded.
 			return resp, err
 		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		if ctxErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 		delay := p.Backoff/2 + time.Duration(rand.Int64N(int64(p.Backoff-p.Backoff/2)+1))
