@@ -122,3 +122,31 @@ func Test_BindStrictJSON(t *testing.T) {
 		})
 	}
 }
+
+func Test_BindStrictJSON_Values(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{`null`, `42`, `true`, `"hello"`, `[1,2]`, `{"a":1}`} {
+		t.Run(body, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+			var dst any
+			then.AssertThat(t, ginpingo.BindStrictJSON(c, &dst), is.True())
+			var want any
+			then.AssertThat(t, json.Unmarshal([]byte(body), &want), is.Nil())
+			then.AssertThat(t, dst, is.EqualTo(want))
+			then.AssertThat(t, c.IsAborted(), is.False())
+		})
+	}
+}
+
+func Test_BindStrictJSON_NilBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	c.Request.Body = nil
+	var dst any
+	then.AssertThat(t, ginpingo.BindStrictJSON(c, &dst), is.False())
+	then.AssertThat(t, w.Code, is.EqualTo(http.StatusBadRequest))
+}

@@ -45,3 +45,25 @@ func Example() {
 	})
 	_ = r
 }
+
+func ExampleBindStrictJSON() {
+	r := gin.New()
+	r.POST("/greet", func(c *gin.Context) {
+		var input struct {
+			Name string `json:"name"`
+		}
+		if !ginpingo.BindStrictJSON(c, &input,
+			ginpingo.WithMaxBytes(64<<10),
+			ginpingo.WithDisallowUnknownFields(),
+		) {
+			return
+		}
+		if input.Name == "" {
+			ginpingo.AbortError(c, http.StatusBadRequest, btpingo.CodeInvalidRequest,
+				"name is required", nil)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"greeting": "Hello, " + input.Name})
+	})
+	_ = r
+}
