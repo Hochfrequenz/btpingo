@@ -77,7 +77,7 @@ func Test_Auth_StreamingCallGetsTheStatusOnTheStream(t *testing.T) {
 			t.Errorf("messages = %d, want 0", n)
 		}
 		c, info := errorInfoOf(t, err)
-		if c != connect.CodeUnauthenticated || info.GetReason() != "unauthorized" {
+		if c != connect.CodeUnauthenticated || info.GetReason() != string(btpingo.CodeUnauthorized) {
 			t.Errorf("got %v %q", c, info.GetReason())
 		}
 	})
@@ -234,7 +234,7 @@ func Test_Auth_LogsTheMappedGRPCCode(t *testing.T) {
 	m.Codes[btpingo.CodeUnauthorized] = connect.CodePermissionDenied
 	ts := startServer(t, grpcpingo.Auth(tokens, testScope, m)(serviceMux(nil)))
 	c, info := errorInfoOf(t, callUnary(ts, nil, "bad"))
-	if c != connect.CodePermissionDenied || info.GetReason() != "unauthorized" {
+	if c != connect.CodePermissionDenied || info.GetReason() != string(btpingo.CodeUnauthorized) {
 		t.Fatalf("client got %v %q", c, info.GetReason())
 	}
 	if !strings.Contains(buf.String(), `"grpc_code":"permission_denied"`) {
@@ -257,12 +257,12 @@ func Test_Auth_RejectionsOverHTTP2(t *testing.T) {
 	t.Cleanup(ts.Close)
 	eachProtocol(t, func(t *testing.T, proto []connect.ClientOption) {
 		c, info := errorInfoOf(t, callUnary(ts, proto, ""))
-		if c != connect.CodeUnauthenticated || info.GetReason() != "unauthorized" {
+		if c != connect.CodeUnauthenticated || info.GetReason() != string(btpingo.CodeUnauthorized) {
 			t.Errorf("unary: %v %q", c, info.GetReason())
 		}
 		n, err := callStream(ts, proto, "")
 		c, info = errorInfoOf(t, err)
-		if n != 0 || c != connect.CodeUnauthenticated || info.GetReason() != "unauthorized" {
+		if n != 0 || c != connect.CodeUnauthenticated || info.GetReason() != string(btpingo.CodeUnauthorized) {
 			t.Errorf("stream: %d messages, %v %q", n, c, info.GetReason())
 		}
 		if err := callUnary(ts, proto, "good"); err != nil {
