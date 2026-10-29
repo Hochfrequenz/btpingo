@@ -76,6 +76,7 @@
 //
 //   - [CompressHandler] — wraps an http.Handler with gzip/zstd response
 //     compression and a Content-Length guard; srv.Handler = CompressHandler(router)
+//   - [CompressHandlerSkipping] — the same, but path prefixes (a gRPC service) bypass it
 //
 // ## On-prem failure classification
 //
