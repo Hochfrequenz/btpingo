@@ -46,6 +46,8 @@ func Example() {
 		return grpcpingo.Auth(validator, "myapp!t1.User", m)(grpcpingo.MaxBodySize(limit, m)(next))
 	}
 
+	// POST only. A service that enables Connect GET (connect.WithIdempotency + WithHTTPGet)
+	// must register GET too; MaxBodySize does not limit a GET's query-string message.
 	r := gin.New()
 	r.POST(path+"*rpc", gin.WrapH(guard(h)))
 

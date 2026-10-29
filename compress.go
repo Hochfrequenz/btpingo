@@ -256,9 +256,16 @@ func (w *clGuardWriter) CloseNotify() <-chan bool {
 //
 //	srv.Handler = btpingo.CompressHandlerSkipping(router, "/test.v1.TestService/")
 //
-// Skipping the Content-Length guard on those paths is harmless: streamed RPC
-// responses carry no Content-Length.
+// A prefix should end with "/", as the path connect-go generates does, so that
+// "/test.v1.TestService/" does not also match "/test.v1.TestServiceAdmin/".
+// An empty prefix would skip every path and panics.
+//
+// Skipping the Content-Length guard on those paths is harmless: connect-go
+// never sets a response Content-Length.
 func CompressHandlerSkipping(h http.Handler, pathPrefixes ...string) http.Handler {
+	if slices.Contains(pathPrefixes, "") {
+		panic("btpingo: CompressHandlerSkipping needs non-empty path prefixes")
+	}
 	compressed := CompressHandler(h)
 	if len(pathPrefixes) == 0 {
 		return compressed

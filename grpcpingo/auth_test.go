@@ -195,3 +195,34 @@ func Test_Auth_PlainHTTPRequestIsRejected(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 }
+
+func Test_Auth_EmptyDomainPanicsAtConstruction(t *testing.T) {
+	defer func() {
+		if r := recover(); r != emptyDomainPanic {
+			t.Fatalf("panic = %v", r)
+		}
+	}()
+	grpcpingo.Auth(tokens, testScope, grpcpingo.Mapper{})
+}
+
+// "Bearer " with nothing behind it is a missing token: routine, so unlogged.
+func Test_Auth_EmptyBearerTokenIsMissingNotInvalid(t *testing.T) {
+	buf := captureLog(t)
+	// a parser that would accept the empty token proves the check is not left to it
+	h := grpcpingo.Auth(fakeParser{"": {"scope": []any{testScope}}}, testScope, mapper)(serviceMux(nil))
+	ts := startServer(t, h)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+unaryPath, strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if buf.String() != "" {
+		t.Fatalf("log = %s", buf.String())
+	}
+}

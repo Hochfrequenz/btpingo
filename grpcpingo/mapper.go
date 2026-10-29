@@ -45,8 +45,8 @@ func DefaultCodes() map[btpingo.ErrorCode]connect.Code {
 // the JSON envelope. The zero value of Codes means [DefaultCodes].
 //
 // Domain is the ErrorInfo domain, usually the name of the service, for
-// example "myservice.example.com". It is required: using a Mapper with an
-// empty Domain panics.
+// example "myservice.example.com". It is required: [Auth] and [MaxBodySize]
+// panic at construction when it is empty, and so does [Mapper.Error].
 type Mapper struct {
 	Domain string
 	Codes  map[btpingo.ErrorCode]connect.Code
@@ -57,9 +57,7 @@ type Mapper struct {
 // Codes does not know becomes Internal with reason "internal"; the code is
 // never invented as a status.
 func (m Mapper) Error(code btpingo.ErrorCode, msg string) *connect.Error {
-	if m.Domain == "" {
-		panic("grpcpingo: Mapper needs a non-empty Domain")
-	}
+	m.mustHaveDomain()
 	codes := m.Codes
 	if codes == nil {
 		codes = DefaultCodes()
@@ -90,4 +88,13 @@ func (m Mapper) Recover(ctx context.Context, _ connect.Spec, _ http.Header, pani
 		"stack", string(debug.Stack()),
 	)
 	return m.Error(btpingo.CodeInternal, "internal error")
+}
+
+// mustHaveDomain panics on an empty Domain. [Auth] and [MaxBodySize] call it at
+// construction: an error built later, inside a request, would panic outside
+// connect's recover and reset the connection instead of answering.
+func (m Mapper) mustHaveDomain() {
+	if m.Domain == "" {
+		panic("grpcpingo: Mapper needs a non-empty Domain")
+	}
 }

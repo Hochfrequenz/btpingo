@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	testDomain = "myservice.example.com"
-	testScope  = "myapp!t1.User"
-	unaryPath  = "/test.v1.TestService/Unary"
-	streamPath = "/test.v1.TestService/Stream"
+	testDomain       = "myservice.example.com"
+	testScope        = "myapp!t1.User"
+	emptyDomainPanic = "grpcpingo: Mapper needs a non-empty Domain"
+	unaryPath        = "/test.v1.TestService/Unary"
+	streamPath       = "/test.v1.TestService/Stream"
 )
 
 // syncBuf is a log sink that tests can read while the server still writes.

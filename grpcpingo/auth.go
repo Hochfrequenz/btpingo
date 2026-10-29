@@ -55,8 +55,12 @@ type authInfo struct {
 // the client); a missing token and a missing scope are routine and stay
 // silent.
 //
+// The Bearer scheme is matched case-insensitively (RFC 9110 section 11.1, via
+// authn.BearerToken), unlike ginpingo.JWT today.
+//
 // Auth is built on connectrpc.com/authn. It panics when scope is empty, so a
-// wiring mistake cannot open the service to every valid token.
+// wiring mistake cannot open the service to every valid token, and when
+// m.Domain is empty.
 //
 // Access logs in front of a gRPC service show HTTP 200 for a rejected call:
 // the gRPC status travels in the trailers, not in the HTTP status.
@@ -64,6 +68,7 @@ func Auth(v TokenParser, scope string, m Mapper, opts ...AuthOption) func(http.H
 	if scope == "" {
 		panic("grpcpingo: Auth needs a non-empty scope")
 	}
+	m.mustHaveDomain()
 	var cfg authConfig
 	for _, o := range opts {
 		o(&cfg)

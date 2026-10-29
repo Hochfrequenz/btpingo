@@ -57,7 +57,7 @@ func Test_MaxBodySize_RejectionIsNotLogged(t *testing.T) {
 	}
 }
 
-// Without a Content-Length (chunked HTTP/1.1, HTTP/2) connect-go's own read limit applies: the code is
+// Without a Content-Length (e.g. chunked or streamed) connect-go's own read limit applies: the code is
 // right, the error carries no ErrorInfo. This is why the doc says to pair MaxBodySize with
 // connect.WithReadMaxBytes.
 func Test_MaxBodySize_ChunkedBodyHitsTheReadLimit(t *testing.T) {
@@ -120,4 +120,13 @@ func Test_MaxBodySize_BehindAuthAnswersAnOversizedUnauthenticatedCallWithUnauthe
 	if c != connect.CodeUnauthenticated {
 		t.Fatalf("code = %v", c)
 	}
+}
+
+func Test_MaxBodySize_EmptyDomainPanicsAtConstruction(t *testing.T) {
+	defer func() {
+		if r := recover(); r != emptyDomainPanic {
+			t.Fatalf("panic = %v", r)
+		}
+	}()
+	grpcpingo.MaxBodySize(bodyLimit, grpcpingo.Mapper{})
 }

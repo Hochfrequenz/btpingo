@@ -83,7 +83,7 @@ func Test_Mapper_UnknownCodeIsInternal(t *testing.T) {
 func Test_Mapper_EmptyDomainPanicsOnFirstUse(t *testing.T) {
 	defer func() {
 		r := recover()
-		if r != "grpcpingo: Mapper needs a non-empty Domain" {
+		if r != emptyDomainPanic {
 			t.Fatalf("panic = %v", r)
 		}
 	}()

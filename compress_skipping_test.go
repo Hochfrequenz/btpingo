@@ -68,3 +68,12 @@ func Test_CompressHandlerSkipping_SkippedPathsBypassTheContentLengthGuard(t *tes
 		t.Fatalf("body = %q", w.Body.String())
 	}
 }
+
+func Test_CompressHandlerSkipping_EmptyPrefixPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("no panic for an empty prefix")
+		}
+	}()
+	btpingo.CompressHandlerSkipping(skippingMux(), "/test.v1.TestService/", "")
+}
