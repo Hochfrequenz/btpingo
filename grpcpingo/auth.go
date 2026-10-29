@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"connectrpc.com/authn"
-	"connectrpc.com/connect"
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/hochfrequenz/btpingo"
@@ -81,13 +80,14 @@ func Auth(v TokenParser, scope string, m Mapper, opts ...AuthOption) func(http.H
 		claims, err := v.Parse(raw)
 		if err != nil {
 			// The parse error can name key ids and the like: log only.
+			cerr := m.Error(btpingo.CodeUnauthorized, "invalid or expired token")
 			slog.ErrorContext(ctx, "grpc auth error",
 				"code", string(btpingo.CodeUnauthorized),
-				"grpc_code", connect.CodeUnauthenticated.String(),
+				"grpc_code", cerr.Code().String(),
 				"request_id", btpingo.RequestIDFromContext(ctx),
 				"err", err,
 			)
-			return nil, m.Error(btpingo.CodeUnauthorized, "invalid or expired token")
+			return nil, cerr
 		}
 		scoped := btpingo.ContextWithScopes(ctx, btpingo.ScopesFromClaims(claims))
 		if !btpingo.HasScope(scoped, scope) {

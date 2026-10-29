@@ -226,3 +226,50 @@ func Test_Auth_EmptyBearerTokenIsMissingNotInvalid(t *testing.T) {
 		t.Fatalf("log = %s", buf.String())
 	}
 }
+
+// The log carries the gRPC code the client actually gets, also when Codes overrides a mapping.
+func Test_Auth_LogsTheMappedGRPCCode(t *testing.T) {
+	buf := captureLog(t)
+	m := grpcpingo.Mapper{Domain: testDomain, Codes: grpcpingo.DefaultCodes()}
+	m.Codes[btpingo.CodeUnauthorized] = connect.CodePermissionDenied
+	ts := startServer(t, grpcpingo.Auth(tokens, testScope, m)(serviceMux(nil)))
+	c, info := errorInfoOf(t, callUnary(ts, nil, "bad"))
+	if c != connect.CodePermissionDenied || info.GetReason() != "unauthorized" {
+		t.Fatalf("client got %v %q", c, info.GetReason())
+	}
+	if !strings.Contains(buf.String(), `"grpc_code":"permission_denied"`) {
+		t.Fatalf("log = %s", buf.String())
+	}
+}
+
+// Native gRPC clients speak HTTP/2, where the status travels in real trailers: the rejection must
+// arrive there on every protocol, for a unary and a streaming call.
+func Test_Auth_RejectionsOverHTTP2(t *testing.T) {
+	captureLog(t)
+	var protoMajor atomic.Int32
+	h := grpcpingo.Auth(tokens, testScope, mapper)(serviceMux(nil))
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protoMajor.Store(int32(r.ProtoMajor))
+		h.ServeHTTP(w, r)
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+	eachProtocol(t, func(t *testing.T, proto []connect.ClientOption) {
+		c, info := errorInfoOf(t, callUnary(ts, proto, ""))
+		if c != connect.CodeUnauthenticated || info.GetReason() != "unauthorized" {
+			t.Errorf("unary: %v %q", c, info.GetReason())
+		}
+		n, err := callStream(ts, proto, "")
+		c, info = errorInfoOf(t, err)
+		if n != 0 || c != connect.CodeUnauthenticated || info.GetReason() != "unauthorized" {
+			t.Errorf("stream: %d messages, %v %q", n, c, info.GetReason())
+		}
+		if err := callUnary(ts, proto, "good"); err != nil {
+			t.Errorf("valid call: %v", err)
+		}
+		if protoMajor.Load() != 2 {
+			t.Errorf("served over HTTP/%d, want 2", protoMajor.Load())
+		}
+	})
+}

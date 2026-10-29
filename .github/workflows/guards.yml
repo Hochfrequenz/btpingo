@@ -46,8 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           # only grpcpingo may pull in connect-go, authn and the genproto error details
-          deps=$(go list -deps -test . ./ginpingo | grep -E '^(connectrpc.com/|google.golang.org/genproto)' || true)
-          if [ -n "$deps" ]; then
-            echo "$deps" >&2
+          deps=$(go list -deps -test . ./ginpingo)
+          if grep -E '^(connectrpc.com/|google.golang.org/genproto)' <<<"$deps"; then
             echo "::error::root package and ginpingo must not depend on connect or genproto" >&2; exit 1
           fi
