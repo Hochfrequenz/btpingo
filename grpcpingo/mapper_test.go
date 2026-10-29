@@ -75,7 +75,7 @@ func Test_Mapper_OverrideAndOwnCode(t *testing.T) {
 func Test_Mapper_UnknownCodeIsInternal(t *testing.T) {
 	m := grpcpingo.Mapper{Domain: testDomain, Codes: grpcpingo.DefaultCodes()}
 	c, info := errorInfoOf(t, m.Error("never_heard_of_it", "x"))
-	if c != connect.CodeInternal || info.GetReason() != "internal" {
+	if c != connect.CodeInternal || info.GetReason() != string(btpingo.CodeInternal) {
 		t.Fatalf("got %v %q", c, info.GetReason())
 	}
 }
@@ -87,7 +87,7 @@ func Test_Mapper_EmptyDomainPanicsOnFirstUse(t *testing.T) {
 			t.Fatalf("panic = %v", r)
 		}
 	}()
-	grpcpingo.Mapper{}.Error(btpingo.CodeInternal, "x")
+	_ = grpcpingo.Mapper{}.Error(btpingo.CodeInternal, "x")
 }
 
 func Test_Mapper_RecoverReturnsInternalAndLogsOnce(t *testing.T) {
@@ -95,7 +95,7 @@ func Test_Mapper_RecoverReturnsInternalAndLogsOnce(t *testing.T) {
 	m := grpcpingo.Mapper{Domain: testDomain}
 	err := m.Recover(context.Background(), connect.Spec{}, http.Header{}, "boom at 10.1.2.3")
 	c, info := errorInfoOf(t, err)
-	if c != connect.CodeInternal || info.GetReason() != "internal" {
+	if c != connect.CodeInternal || info.GetReason() != string(btpingo.CodeInternal) {
 		t.Fatalf("got %v %q", c, info.GetReason())
 	}
 	if strings.Contains(err.Error(), "10.1.2.3") {
@@ -116,11 +116,11 @@ func Test_Mapper_RecoverThroughHandlerAnswersEachProtocol(t *testing.T) {
 	ts := startServer(t, mux)
 	eachProtocol(t, func(t *testing.T, proto []connect.ClientOption) {
 		c, info := errorInfoOf(t, callUnary(ts, proto, ""))
-		if c != connect.CodeInternal || info.GetReason() != "internal" || info.GetDomain() != testDomain {
+		if c != connect.CodeInternal || info.GetReason() != string(btpingo.CodeInternal) || info.GetDomain() != testDomain {
 			t.Errorf("unary: %v %q", c, info.GetReason())
 		}
 		_, err := callStream(ts, proto, "")
-		if c, info := errorInfoOf(t, err); c != connect.CodeInternal || info.GetReason() != "internal" {
+		if c, info := errorInfoOf(t, err); c != connect.CodeInternal || info.GetReason() != string(btpingo.CodeInternal) {
 			t.Errorf("stream: %v %q", c, info.GetReason())
 		}
 	})

@@ -12,10 +12,11 @@ A Go client for apps on **SAP BTP Cloud Foundry** that call an **on-premise SAP 
 
 SAP's Cloud SDK covers this for Java and JavaScript only. Without it, every Go app on BTP rebuilds it.
 
-It ships as two packages:
+It ships as three packages:
 
 - **`btpingo`** (this module's root) — the framework-neutral core above. It does not import Gin, so a huma (or other non-Gin) service can depend on it alone.
 - **`btpingo/ginpingo`** — Gin middleware and handlers built on the core: JWT validation, request ID, `MaxBodySize`, `BindStrictJSON`, scope enforcement, the error writer, and a generic proxy handler. Import this only from a Gin-based service.
+- **`btpingo/grpcpingo`** — the same for gRPC: `net/http` middleware for [connect-go](https://connectrpc.com/) handlers (JWT and scope check, request-size limit, error mapping with `ErrorInfo`). It serves gRPC, gRPC-Web and Connect. Import this only from a service with connect-go handlers.
 
 ```sh
 go get github.com/hochfrequenz/btpingo
@@ -56,7 +57,7 @@ api.GET("/ping", func(c *gin.Context) {
 
 Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
 
-The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo).
+The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo), [`btpingo/grpcpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/grpcpingo).
 
 ## ginpingo
 
@@ -75,6 +76,31 @@ if !ginpingo.BindStrictJSON(c, &input,
 ```
 
 The default limit is `DefaultMaxBodyBytes` (1 MiB); `WithMaxBytes` sets a per-call limit without overriding a smaller `MaxBodySize` middleware limit. Overflow yields 413 `CodeRequestTooLarge`. Empty, malformed, type-mismatched, or trailing JSON yields 400 `CodeInvalidRequest`; `WithDisallowUnknownFields` also rejects unknown struct fields. Client messages are stable and generic; underlying errors are logged server-side via `AbortError`. Binding-tag validation is not performed.
+
+## grpcpingo (gRPC / Connect)
+
+`grpcpingo` guards [connect-go](https://connectrpc.com/) handlers, which serve gRPC, gRPC-Web and Connect from one `http.Handler`. Its middleware have the plain `func(http.Handler) http.Handler` shape, so they wrap a handler directly or sit in a gin route through `gin.WrapH`. A rejected call is answered in the protocol of the request, and on a streaming call the status arrives on the stream. The package imports connect-go and `connectrpc.com/authn`; the root package and `ginpingo` do not.
+
+```go
+m := grpcpingo.Mapper{Domain: "myservice.example.com"} // ErrorInfo domain, required
+path, h := testv1connect.NewTestServiceHandler(impl,
+	connect.WithRecover(m.Recover),  // a panic becomes Internal with ErrorInfo
+	connect.WithReadMaxBytes(1<<20), // limit for bodies without a Content-Length
+)
+guard := func(next http.Handler) http.Handler {
+	return grpcpingo.Auth(validator, "myapp!t1.User", m)(grpcpingo.MaxBodySize(1<<20, m)(next))
+}
+r.POST(path+"*rpc", gin.WrapH(guard(h)))
+
+srv := &http.Server{Handler: btpingo.CompressHandlerSkipping(r, path)}
+```
+
+- **`Auth(validator, scope, m)`** is `ginpingo.JWT` plus `RequireScope` for connect: `Authorization: Bearer` is required, the token is validated, `scope` must be in it. The context carries the forwarded token and the scopes as with `ginpingo.JWT`, and `WithContextFromClaims` adds more values from the claims. A missing or invalid token is `Unauthenticated` (reason `unauthorized`), a missing scope `PermissionDenied` (`forbidden`). Only an invalid token is logged, once at ERROR, as with `AbortError`. An empty scope panics at construction.
+- **`MaxBodySize(limit, m)`** answers a `Content-Length` over `limit` with `ResourceExhausted` (`request_too_large`) and caps every body at `limit` bytes. Put `Auth` before it. A body without a `Content-Length` is caught by `connect.WithReadMaxBytes`, which gives the same code but no `ErrorInfo`, so set both.
+- **`Mapper`** maps a `btpingo.ErrorCode` to a gRPC code and exactly one `google.rpc.ErrorInfo` whose reason is the code and whose domain is `Mapper.Domain`. `DefaultCodes()` holds the mapping of the canonical codes; pass a changed copy as `Mapper.Codes` to add your own codes. An unknown code becomes `Internal`. `m.Recover` is the `connect.WithRecover` handler: it logs the panic and stack once and returns `Internal` with `ErrorInfo`.
+- **`CompressHandlerSkipping(h, prefixes...)`** is `CompressHandler` except that paths under the prefixes go to `h` directly. Use it for the RPC path: gzhttp would add an HTTP `Content-Encoding` to `application/grpc` responses, and gRPC clients reject that. gRPC and Connect compress messages on their own.
+
+An access log in front of a gRPC service shows HTTP 200 for a failed call: the gRPC status travels in the trailers. Log the gRPC code if you want it in the access log.
 
 ## Response compression
 
