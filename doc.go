@@ -11,7 +11,10 @@
 // handlers (JWT validation, request ID, scope enforcement, the error
 // writer, and a generic proxy handler); a huma or other non-Gin
 // service uses this package's context helpers directly and never
-// needs that subpackage.
+// needs that subpackage. A service with connect-go (gRPC, gRPC-Web,
+// Connect) handlers imports
+// github.com/hochfrequenz/btpingo/grpcpingo for the matching net/http
+// middleware; this package imports neither connect-go nor gin.
 //
 // # API surface
 //
@@ -76,6 +79,7 @@
 //
 //   - [CompressHandler] — wraps an http.Handler with gzip/zstd response
 //     compression and a Content-Length guard; srv.Handler = CompressHandler(router)
+//   - [CompressHandlerSkipping] — the same, but path prefixes (a gRPC service) bypass it
 //
 // ## On-prem failure classification
 //

@@ -42,3 +42,11 @@ jobs:
           if grep -qx github.com/gin-gonic/gin <<<"$deps"; then
             echo "::error::core package btpingo must not depend on gin" >&2; exit 1
           fi
+      - name: Core and ginpingo must not depend on connect
+        run: |
+          set -euo pipefail
+          # only grpcpingo may pull in connect-go, authn and the genproto error details
+          deps=$(go list -deps -test . ./ginpingo)
+          if grep -E '^(connectrpc.com/|google.golang.org/genproto)' <<<"$deps"; then
+            echo "::error::root package and ginpingo must not depend on connect or genproto" >&2; exit 1
+          fi

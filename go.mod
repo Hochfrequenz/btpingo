@@ -3,12 +3,16 @@ module github.com/hochfrequenz/btpingo
 go 1.26.0
 
 require (
+	connectrpc.com/authn v0.2.0
+	connectrpc.com/connect v1.21.1
 	github.com/MicahParks/keyfunc/v3 v3.8.2
 	github.com/corbym/gocrest v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/klauspost/compress v1.20.3
 	golang.org/x/sync v0.24.0
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -42,5 +46,4 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )

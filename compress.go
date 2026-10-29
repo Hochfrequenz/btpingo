@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/klauspost/compress/gzhttp"
 )
@@ -239,4 +241,43 @@ func (w *clGuardWriter) CloseNotify() <-chan bool {
 		ch <- true
 	}()
 	return ch
+}
+
+// CompressHandlerSkipping is [CompressHandler] except that a request whose
+// URL path starts with one of pathPrefixes goes to h directly: its response
+// is neither compressed nor checked against its Content-Length. With no
+// prefixes it is CompressHandler.
+//
+// The use case is gRPC. gzhttp compresses application/grpc* responses by
+// default, and gRPC clients reject an HTTP Content-Encoding (gRPC and
+// Connect compress messages on their own, via Grpc-Encoding and
+// Connect-Content-Encoding). Pass the service's path prefix, for example
+// "/test.v1.TestService/":
+//
+//	srv.Handler = btpingo.CompressHandlerSkipping(router, "/test.v1.TestService/")
+//
+// A prefix should end with "/", as the path connect-go generates does, so that
+// "/test.v1.TestService/" does not also match "/test.v1.TestServiceAdmin/".
+// An empty prefix would skip every path and panics.
+//
+// Skipping the Content-Length guard on those paths is harmless: connect-go
+// never sets a response Content-Length.
+func CompressHandlerSkipping(h http.Handler, pathPrefixes ...string) http.Handler {
+	if slices.Contains(pathPrefixes, "") {
+		panic("btpingo: CompressHandlerSkipping needs non-empty path prefixes")
+	}
+	compressed := CompressHandler(h)
+	if len(pathPrefixes) == 0 {
+		return compressed
+	}
+	prefixes := slices.Clone(pathPrefixes)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range prefixes {
+			if strings.HasPrefix(r.URL.Path, p) {
+				h.ServeHTTP(w, r)
+				return
+			}
+		}
+		compressed.ServeHTTP(w, r)
+	})
 }
