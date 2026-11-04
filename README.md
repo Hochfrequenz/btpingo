@@ -112,6 +112,24 @@ srv := &http.Server{Handler: btpingo.CompressHandler(router)}
 
 `CompressHandler` wraps any `http.Handler` with response compression. A response is compressed with zstd or gzip only when the request's `Accept-Encoding` accepts one of them by q-value (zstd preferred on a tie); a request with no `Accept-Encoding`, one that excludes both, or a body under the minimum size is sent uncompressed. If a handler writes fewer or more bytes than its declared `Content-Length` (e.g. a proxied on-prem response cut off mid-copy), it aborts the connection instead of sending a cleanly compressed short or long body.
 
+## btpingotest (tests and local mocks)
+
+`btpingotest` is for tests and local mock setups. Never import it from production code; CI fails if a library package does.
+
+```go
+caller := btpingotest.NewHandlerCaller(fakeSAP, btpingotest.WithDestinationName("SAP"))
+
+xsuaa, _ := btpingotest.NewXSUAA(btpingotest.XSUAAConfig{
+    XSAppName: "myapp!t1", AppClientID: "sb-myapp!t1",
+    Clients: []btpingotest.XSUAAClient{{ClientID: "caller", Secret: "s", Scopes: []string{"myapp!t1.User"}}},
+})
+mux.Handle("/", xsuaa) // serves /token_keys and /oauth/token
+validator, _ := btpingo.NewJWTValidator(ctx, xsuaa.Credentials(baseURL))
+token, _ := xsuaa.MintToken("caller")
+```
+
+`HandlerCaller` is an `OnPremCaller` that serves any `http.Handler` in-process, with the same destination check, header filtering, response size cap and context handling as `Service.CallOnPremise`. The mock XSUAA issues RS256 tokens shaped like XSUAA's, so the real `JWTValidator`, `ginpingo.JWT` and `RequireScope` run unchanged.
+
 ## Safety defaults
 
 - **Host pin:** an on-premise request always goes to the destination's own scheme and host. A path suffix, an authenticator or a redirect cannot steer it elsewhere. Redirects are followed only while they stay on that origin.

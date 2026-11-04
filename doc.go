@@ -112,4 +112,18 @@
 // retried. Callers with application-specific failure signals must handle
 // those before opting into a retry; they must not present them as plain
 // transport errors.
+//
+// # Test doubles (btpingotest)
+//
+// The subpackage [github.com/hochfrequenz/btpingo/btpingotest] is for tests
+// and local mocks only and must never be imported by production code; a CI
+// guard fails if a library package does. It offers two parts:
+//
+//   - HandlerCaller, an [OnPremCaller] that serves an http.Handler in-process
+//     and behaves like [Service.CallOnPremise] where a caller can see it
+//     (destination name, path rules, header filtering, response size limit,
+//     context), with injectable transport failures;
+//   - XSUAA, a mock XSUAA http.Handler serving /token_keys and /oauth/token
+//     (client_credentials), with Credentials and MintToken, so the real
+//     [JWTValidator] and ginpingo.JWT can run against it.
 package btpingo

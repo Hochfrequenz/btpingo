@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/hochfrequenz/btpingo/internal/fwdheader"
+	"github.com/hochfrequenz/btpingo/internal/limitbody"
+	"github.com/hochfrequenz/btpingo/internal/pathsuffix"
 )
 
 // OnPremCaller is the single-method contract Gin handlers should depend
@@ -212,7 +214,7 @@ func WithCSRFFetchPath(path string) ServiceOption {
 // Reads that would push a single response past `bytes` return
 // ErrOnPremResponseTooLarge from the wrapped resp.Body. Zero or
 // negative resets to DefaultOnPremResponseSizeLimit — a negative limit
-// has no sensible meaning as a cap, and limitedOnPremBody's slice math
+// has no sensible meaning as a cap, and limitbody's slice math
 // assumes a non-negative one. Pass a larger value if a single route
 // legitimately returns more.
 func WithOnPremResponseSizeLimit(bytes int64) ServiceOption {
@@ -330,21 +332,8 @@ func (s *Service) Authenticators() *AuthenticatorRegistry { return s.authenticat
 // (CodeUpstreamUnreachable). The cap protects against an SAP/CC
 // misroute streaming gigabytes into the CF memory quota.
 func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffix string, headers http.Header, body io.Reader) (*http.Response, error) {
-	// Reject traversal attempts at the edge: a user-supplied `..` in
-	// pathSuffix would otherwise travel unchanged into the on-prem URL,
-	// where some SAP HTTP frontends resolve it against the destination
-	// root and serve a resource the destination's author never meant to
-	// expose. The same risk applies to percent-encoded variants
-	// (`%2e%2e`, mixed case, `%2e.`, …) because some frontends decode
-	// before applying path-resolution rules. Rather than chase decoder
-	// quirks, reject any `%` in pathSuffix outright — the current API
-	// surface only hands legitimate ASCII path segments to the Service;
-	// revisit if a real UTF-8-in-path use case ever turns up.
-	if strings.Contains(pathSuffix, "..") {
-		return nil, fmt.Errorf("path suffix %q contains '..'; traversal is not allowed", pathSuffix)
-	}
-	if strings.Contains(pathSuffix, "%") {
-		return nil, fmt.Errorf("path suffix %q contains '%%'; percent-encoded path segments are not allowed", pathSuffix)
+	if err := pathsuffix.Check(pathSuffix); err != nil {
+		return nil, err
 	}
 
 	destToken, err := s.tokens.Fetch(ctx, s.env.Dest.URL, s.env.Dest.ClientID, s.env.Dest.ClientSecret)
@@ -604,27 +593,7 @@ func (s *Service) callOnce(ctx context.Context, dest *Destination, method, pathS
 	if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host {
 		return nil, fmt.Errorf("on-prem request target %q does not match destination host %s://%s", target, base.Scheme, base.Host)
 	}
-	for k, vs := range headers {
-		if strings.EqualFold(k, "Cookie") {
-			// Cookies get per-cookie filtering — other session
-			// cookies (JSESSIONID etc.) are dropped, SAP session
-			// cookies (SAP_SESSIONID_* / sap-usercontext) pass through
-			// so CallOnPremiseMutating can inject them for the CSRF
-			// handshake. See filterForwardedCookies below.
-			for _, v := range vs {
-				if kept := filterForwardedCookies(v); kept != "" {
-					req.Header.Add("Cookie", kept)
-				}
-			}
-			continue
-		}
-		if fwdheader.Skip(k) {
-			continue
-		}
-		for _, v := range vs {
-			req.Header.Add(k, v)
-		}
-	}
+	fwdheader.Forward(req.Header, headers)
 	// A neutral, self-identifying UA. Impersonating a browser to get past
 	// a system-specific SAP filter is not a BTP requirement and is not
 	// done here. The concrete value comes from WithUserAgent (or
@@ -661,74 +630,12 @@ func (s *Service) callOnce(ctx context.Context, dest *Destination, method, pathS
 	// before; an attempt to read past the cap returns
 	// ErrOnPremResponseTooLarge from Read, which the caller's io.ReadAll
 	// surfaces as a typed error.
-	resp.Body = newLimitedOnPremBody(resp.Body, s.onPremResponseSizeLimit)
+	resp.Body = limitbody.New(resp.Body, s.onPremResponseSizeLimit, ErrOnPremResponseTooLarge)
 	return resp, nil
 }
 
-// limitedOnPremBody wraps an http.Response.Body to enforce a maximum
-// total read size. Reads up to limit bytes pass through unchanged;
-// the (limit+1)-th byte triggers ErrOnPremResponseTooLarge from Read.
-// The wrapper caps the per-Read slice so callers buffering the body
-// (io.ReadAll) cannot grow the buffer past limit before hitting the
-// error — the memory invariant the cap exists for.
-type limitedOnPremBody struct {
-	rc    io.ReadCloser
-	limit int64
-	read  int64
-}
-
-func newLimitedOnPremBody(rc io.ReadCloser, limit int64) io.ReadCloser {
-	return &limitedOnPremBody{rc: rc, limit: limit}
-}
-
-func (b *limitedOnPremBody) Read(p []byte) (int, error) {
-	if b.read > b.limit {
-		return 0, ErrOnPremResponseTooLarge
-	}
-	// Cap the slice so we read at most one byte past the limit — that's
-	// what proves the body has more than `limit` content. Without this
-	// cap a single Read of e.g. 32 KiB into a 1-byte-remaining budget
-	// would buffer 32 KiB before the error fires.
-	remaining := b.limit - b.read + 1
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-	n, err := b.rc.Read(p)
-	b.read += int64(n)
-	if b.read > b.limit {
-		return n, ErrOnPremResponseTooLarge
-	}
-	return n, err
-}
-
-func (b *limitedOnPremBody) Close() error { return b.rc.Close() }
-
-// filterForwardedCookies reads one inbound `Cookie:` header value and
-// returns a `Cookie:` value containing only cookies that are safe to
-// forward to the SAP side:
-//
-//   - SAP_SESSIONID_<sid>_<client> — the SAP session cookie set by the
-//     server after a CSRF-fetch; mutating calls must echo it back or
-//     the ICF rejects them.
-//   - sap-usercontext — SAP's per-user context handle.
-//
-// Everything else (approuter's JSESSIONID, tracking cookies, etc.) is
-// dropped. Empty return value means no `Cookie:` header should travel
-// at all — callers must skip the Add in that case.
+// filterForwardedCookies keeps only the SAP session cookies of one
+// inbound Cookie header value; see fwdheader.FilterCookies.
 func filterForwardedCookies(cookieHeader string) string {
-	var kept []string
-	for _, part := range strings.Split(cookieHeader, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		name := part
-		if i := strings.IndexByte(name, '='); i >= 0 {
-			name = name[:i]
-		}
-		if strings.HasPrefix(name, "SAP_SESSIONID_") || name == "sap-usercontext" {
-			kept = append(kept, part)
-		}
-	}
-	return strings.Join(kept, "; ")
+	return fwdheader.FilterCookies(cookieHeader)
 }
