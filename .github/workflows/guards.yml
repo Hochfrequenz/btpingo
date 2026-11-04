@@ -50,3 +50,26 @@ jobs:
           if grep -E '^(connectrpc.com/|google.golang.org/genproto)' <<<"$deps"; then
             echo "::error::root package and ginpingo must not depend on connect or genproto" >&2; exit 1
           fi
+      - name: Library code must not import btpingotest
+        run: |
+          set -euo pipefail
+          # btpingotest holds mocks for tests and local setups; no shipped
+          # package may depend on it, directly or transitively. Test files are
+          # not part of `go list -deps` without -test. btpingotest itself and
+          # internal/testkit (test fixtures that delegate to it) are exempt,
+          # but internal/testkit must in turn stay out of every other package.
+          mod=$(go list -m)
+          fail=0
+          pkgs=$(go list ./...)
+          for pkg in $pkgs; do
+            case "$pkg" in
+              "$mod/btpingotest"|"$mod/internal/testkit") continue ;;
+            esac
+            # a failing go list (e.g. an import cycle) must fail the guard
+            deps=$(go list -deps -f '{{.ImportPath}}' "$pkg")
+            if grep -xE "$mod/(btpingotest|internal/testkit)" <<<"$deps"; then
+              echo "::error::non-test package $pkg must not import btpingotest or internal/testkit" >&2
+              fail=1
+            fi
+          done
+          exit $fail
