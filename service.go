@@ -1,7 +1,6 @@
 package btpingo
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,13 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 
 	"github.com/hochfrequenz/btpingo/internal/fwdheader"
 	"github.com/hochfrequenz/btpingo/internal/limitbody"
+	"github.com/hochfrequenz/btpingo/internal/onprem"
 	"github.com/hochfrequenz/btpingo/internal/pathsuffix"
 )
 
@@ -69,25 +66,8 @@ type Service struct {
 	userAgent               string
 	onPremResponseSizeLimit int64
 
-	// CSRF handshake state — see CallOnPremiseMutating for the dance.
-	// csrfFetchPath is the GET path used to retrieve a fresh token.
-	// csrfStates caches token + SAP session cookies keyed by
-	// destination name; csrfMu guards only the cache read/write.
-	// csrfGroup dedupes concurrent fetches for the same destination
-	// so N goroutines racing into a cold cache produce ONE SAP
-	// round-trip, not N.
-	csrfFetchPath string
-	csrfMu        sync.Mutex
-	csrfStates    map[string]*csrfState
-	csrfGroup     singleflight.Group
-}
-
-// csrfState holds one destination's cached X-CSRF-Token and the SAP
-// session cookies that came back with it. The SAP side pins the
-// token to the session; both travel together or not at all.
-type csrfState struct {
-	token   string
-	cookies []*http.Cookie
+	// csrf runs the CSRF handshake of CallOnPremiseMutating.
+	csrf *onprem.CSRF
 }
 
 // DefaultMgmtTimeout is the per-call timeout for management calls (XSUAA
@@ -146,28 +126,9 @@ var ErrOnPremResponseTooLarge = errors.New("on-prem response exceeds configured 
 // as OnPremFailureTransport.
 var ErrOnPremCrossOriginRedirect = errors.New("on-prem redirect to a different scheme or host")
 
-// maxOnPremRedirects matches net/http's default redirect limit, which
-// a custom CheckRedirect replaces and must therefore re-implement.
-const maxOnPremRedirects = 10
-
-// checkOnPremRedirect is the on-prem client's CheckRedirect: follow a
-// redirect only while it stays on the scheme+host of the original
-// request (via[0]), up to maxOnPremRedirects hops. Hosts compare
-// case-insensitively; an explicit default port still counts as a
-// different host (fail closed).
-func checkOnPremRedirect(req *http.Request, via []*http.Request) error {
-	// Origin first, so a cross-origin redirect reports the sentinel even
-	// when it is also the hop that reaches the limit.
-	origin := via[0].URL
-	if req.URL.Scheme != origin.Scheme || !strings.EqualFold(req.URL.Host, origin.Host) {
-		return fmt.Errorf("%w: %s://%s redirected to %s://%s",
-			ErrOnPremCrossOriginRedirect, origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
-	}
-	if len(via) >= maxOnPremRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxOnPremRedirects)
-	}
-	return nil
-}
+// checkOnPremRedirect is the on-prem client's CheckRedirect, shared with
+// btpingotest.HandlerCaller; see onprem.RedirectPolicy.
+var checkOnPremRedirect = onprem.RedirectPolicy(ErrOnPremCrossOriginRedirect)
 
 // ServiceOption configures NewService. Use WithUserAgent, WithMgmtTimeout,
 // and WithOnPremiseTimeout to tune the defaults; zero options keeps the
@@ -296,8 +257,7 @@ func NewService(env *Env, opts ...ServiceOption) (*Service, error) {
 		onPremClient:            &http.Client{Transport: transport, Timeout: o.onPremiseTimeout, CheckRedirect: checkOnPremRedirect},
 		userAgent:               o.userAgent,
 		onPremResponseSizeLimit: o.onPremResponseSizeLimit,
-		csrfFetchPath:           o.csrfFetchPath,
-		csrfStates:              map[string]*csrfState{},
+		csrf:                    onprem.NewCSRF(o.csrfFetchPath),
 	}, nil
 }
 
@@ -363,7 +323,7 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 	// handed us nil — safer than silently draining and re-seeking. A
 	// body-carrying call that gets a 401 returns it as-is; the cache
 	// invalidation above still lets the next call heal itself.
-	if resp.StatusCode == http.StatusUnauthorized && body == nil {
+	if onprem.Retry401(resp.StatusCode, body) {
 		_ = resp.Body.Close()
 		dest, err = s.destinations.Lookup(ctx, s.env.Dest, destToken, destName)
 		if err != nil {
@@ -417,150 +377,7 @@ func (s *Service) invalidateOn401(destName string) {
 // DefaultOnPremResponseSizeLimit (override via WithOnPremResponseSizeLimit);
 // a read past the cap returns ErrOnPremResponseTooLarge.
 func (s *Service) CallOnPremiseMutating(ctx context.Context, destName, method, pathSuffix string, headers http.Header, body io.Reader) (*http.Response, error) {
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("read mutating body: %w", err)
-		}
-	}
-
-	state, err := s.csrfStateFor(ctx, destName)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.callMutatingOnce(ctx, destName, method, pathSuffix, headers, bodyBytes, state)
-	if err != nil {
-		return nil, err
-	}
-	// SAP signals a CSRF-specific rejection via 403 + X-CSRF-Token: Required.
-	// Other 403s are real authz failures and must NOT be retried — they
-	// indicate the technical user lacks the object-level authorization,
-	// which fresh tokens cannot fix.
-	if resp.StatusCode == http.StatusForbidden &&
-		strings.EqualFold(resp.Header.Get("X-CSRF-Token"), "Required") {
-		_ = resp.Body.Close()
-		s.invalidateCSRF(destName)
-		state, err = s.csrfStateFor(ctx, destName)
-		if err != nil {
-			return nil, err
-		}
-		resp, err = s.callMutatingOnce(ctx, destName, method, pathSuffix, headers, bodyBytes, state)
-	}
-	return resp, err
-}
-
-// callMutatingOnce attaches the given CSRF token + cookies to a copy
-// of headers and delegates to CallOnPremise. Sharing the read path
-// means all the three-leg plumbing (destination lookup, 401 retry,
-// authenticator application) stays in one place.
-func (s *Service) callMutatingOnce(ctx context.Context, destName, method, pathSuffix string,
-	headers http.Header, body []byte, state *csrfState) (*http.Response, error) {
-	out := http.Header{}
-	for k, vs := range headers {
-		for _, v := range vs {
-			out.Add(k, v)
-		}
-	}
-	out.Set("X-CSRF-Token", state.token)
-	// RFC 6265 says clients send one Cookie header with cookies joined
-	// by "; ". Go lets you Add multiple Cookie headers and the stdlib
-	// will send them all, but servers reading via r.Header.Get("Cookie")
-	// only see the first value — combine them upfront to avoid that
-	// foot-gun on the SAP side.
-	if len(state.cookies) > 0 {
-		parts := make([]string, 0, len(state.cookies))
-		for _, c := range state.cookies {
-			parts = append(parts, c.Name+"="+c.Value)
-		}
-		out.Set("Cookie", strings.Join(parts, "; "))
-	}
-	var r io.Reader
-	if body != nil {
-		r = bytes.NewReader(body)
-	}
-	return s.CallOnPremise(ctx, destName, method, pathSuffix, out, r)
-}
-
-// csrfStateFor returns the cached CSRF state for destName, fetching
-// it if absent. Concurrent first-misses for the same destination are
-// deduped through singleflight — N goroutines racing into a cold
-// cache trigger exactly ONE SAP round-trip, all N see the same state.
-// The short mutex sections only guard the in-memory map; we never
-// hold them across the network call.
-func (s *Service) csrfStateFor(ctx context.Context, destName string) (*csrfState, error) {
-	// Fast path: cached.
-	s.csrfMu.Lock()
-	state, ok := s.csrfStates[destName]
-	s.csrfMu.Unlock()
-	if ok {
-		return state, nil
-	}
-	// Slow path: singleflight-dedupe the fetch.
-	v, err, _ := s.csrfGroup.Do(destName, func() (any, error) {
-		// Another goroutine's Do() may have populated the cache by
-		// the time this callback runs — re-check.
-		s.csrfMu.Lock()
-		if existing, ok := s.csrfStates[destName]; ok {
-			s.csrfMu.Unlock()
-			return existing, nil
-		}
-		s.csrfMu.Unlock()
-
-		fetched, err := s.fetchCSRF(ctx, destName)
-		if err != nil {
-			return nil, err
-		}
-		s.csrfMu.Lock()
-		s.csrfStates[destName] = fetched
-		s.csrfMu.Unlock()
-		return fetched, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.(*csrfState), nil
-}
-
-// fetchCSRF performs the X-CSRF-Token: Fetch handshake against the
-// configured fetch path. Separated out so csrfStateFor's singleflight
-// callback can run it without holding the state mutex — if the mutex
-// wrapped the network call, a slow SAP would block cache reads for
-// OTHER destinations too.
-func (s *Service) fetchCSRF(ctx context.Context, destName string) (*csrfState, error) {
-	// Accept: */* matters — some SAP ICF nodes return 400 without it
-	// on the Fetch handshake. We do not read the body anyway (the
-	// token travels in the response header), so widest-possible Accept
-	// is correct.
-	resp, err := s.CallOnPremise(ctx, destName, http.MethodGet, s.csrfFetchPath,
-		http.Header{
-			"X-CSRF-Token": []string{"Fetch"},
-			"Accept":       []string{"*/*"},
-		}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("csrf fetch: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("csrf fetch %s returned status %d: %s",
-			s.csrfFetchPath, resp.StatusCode, strings.TrimSpace(string(bodySnippet)))
-	}
-	token := resp.Header.Get("X-CSRF-Token")
-	if token == "" {
-		return nil, fmt.Errorf("csrf fetch %s returned empty X-CSRF-Token header", s.csrfFetchPath)
-	}
-	return &csrfState{token: token, cookies: resp.Cookies()}, nil
-}
-
-// invalidateCSRF drops the cached token + cookies for destName. Called
-// when SAP signals a CSRF-specific rejection (403 + X-CSRF-Token:
-// Required) so the next CallOnPremiseMutating refreshes.
-func (s *Service) invalidateCSRF(destName string) {
-	s.csrfMu.Lock()
-	delete(s.csrfStates, destName)
-	s.csrfMu.Unlock()
+	return s.csrf.Do(ctx, s.CallOnPremise, destName, method, pathSuffix, headers, body)
 }
 
 func (s *Service) callOnce(ctx context.Context, dest *Destination, method, pathSuffix string, headers http.Header, body io.Reader) (*http.Response, error) {

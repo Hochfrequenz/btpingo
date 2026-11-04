@@ -32,8 +32,9 @@ func newXSUAA(t *testing.T) (*btpingotest.XSUAA, *httptest.Server) {
 		XSAppName:   appName,
 		AppClientID: appClientID,
 		Clients: []btpingotest.XSUAAClient{
-			{ClientID: appClientID, Secret: "secret", Scopes: []string{userScope}},
-			{ClientID: "noscope", Secret: "secret2"},
+			{ClientID: appClientID, Secret: "secret", Scopes: []string{"openid", userScope}},
+			{ClientID: "foreign", Secret: "secret2", Scopes: []string{userScope}},
+			{ClientID: "noscope", Secret: "secret3", Scopes: []string{"openid"}},
 		},
 	})
 	then.AssertThat(t, err, is.Nil())
@@ -93,7 +94,9 @@ func Test_XSUAA_TokenThroughRealAuthChain(t *testing.T) {
 	}{
 		{"basic, with scope", basic(appClientID, "secret"), url.Values{"grant_type": {"client_credentials"}}, http.StatusOK},
 		{"form, with scope", nil, url.Values{"grant_type": {"client_credentials"}, "client_id": {appClientID}, "client_secret": {"secret"}}, http.StatusOK},
-		{"basic, without scope", basic("noscope", "secret2"), url.Values{"grant_type": {"client_credentials"}}, http.StatusForbidden},
+		{"own client narrowed to openid: valid token, scope missing", basic(appClientID, "secret"), url.Values{"grant_type": {"client_credentials"}, "scope": {"openid"}}, http.StatusForbidden},
+		{"own client, scope requested explicitly", basic(appClientID, "secret"), url.Values{"grant_type": {"client_credentials"}, "scope": {"openid " + userScope}}, http.StatusOK},
+		{"client with other scopes only", basic("noscope", "secret3"), url.Values{"grant_type": {"client_credentials"}}, http.StatusUnauthorized},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -106,7 +109,7 @@ func Test_XSUAA_TokenThroughRealAuthChain(t *testing.T) {
 			}
 			then.AssertThat(t, json.NewDecoder(resp.Body).Decode(&body), is.Nil())
 			then.AssertThat(t, body.TokenType, is.EqualTo("bearer"))
-			then.AssertThat(t, body.ExpiresIn, is.EqualTo(12*3600))
+			then.AssertThat(t, body.ExpiresIn, is.EqualTo(12*3600-1))
 
 			req := httptest.NewRequest(http.MethodGet, "/x", nil)
 			req.Header.Set("Authorization", "Bearer "+body.AccessToken)
@@ -129,7 +132,7 @@ func Test_XSUAA_MintToken(t *testing.T) {
 	for _, c := range []struct {
 		client string
 		status int
-	}{{appClientID, http.StatusOK}, {"noscope", http.StatusForbidden}} {
+	}{{appClientID, http.StatusOK}, {"noscope", http.StatusUnauthorized}} {
 		t.Run(c.client, func(t *testing.T) {
 			tok, err := x.MintToken(c.client)
 			then.AssertThat(t, err, is.Nil())
@@ -142,13 +145,51 @@ func Test_XSUAA_MintToken(t *testing.T) {
 	}
 	_, err := x.MintToken("nobody")
 	then.AssertThat(t, err, is.Not(is.Nil()))
+
+	t.Run("narrowed to openid gives 403", func(t *testing.T) {
+		tok, err := x.MintToken(appClientID, "openid")
+		then.AssertThat(t, err, is.Nil())
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		then.AssertThat(t, w.Code, is.EqualTo(http.StatusForbidden))
+	})
+	t.Run("ungranted scope is an error", func(t *testing.T) {
+		_, err := x.MintToken("noscope", userScope)
+		then.AssertThat(t, err, is.Not(is.Nil()))
+	})
+}
+
+// Test_ForeignClientToken_RejectedByCurrentValidator pins a SUSPECTED
+// production limitation, not a desired behaviour: a foreign client that was
+// granted the application's scope gets a token with aud [foreign-id,
+// "<xsappname>"], and btpingo's validator (WithAudience(app client ID))
+// answers 401. To be verified against a real XSUAA; if the validator
+// changes, this test is expected to change with it.
+func Test_ForeignClientToken_RejectedByCurrentValidator(t *testing.T) {
+	x, srv := newXSUAA(t)
+	r := apiRouter(t, x.Credentials(srv.URL))
+	tok, err := x.MintToken("foreign")
+	then.AssertThat(t, err, is.Nil())
+	claims := jwt.MapClaims{}
+	_, _, err = jwt.NewParser().ParseUnverified(tok, claims)
+	then.AssertThat(t, err, is.Nil())
+	aud, _ := claims.GetAudience()
+	then.AssertThat(t, []string(aud), is.EqualTo([]string{"foreign", appName}))
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	then.AssertThat(t, w.Code, is.EqualTo(http.StatusUnauthorized))
 }
 
 func Test_XSUAA_TokenShape(t *testing.T) {
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	x, err := btpingotest.NewXSUAA(btpingotest.XSUAAConfig{
-		XSAppName: appName, AppClientID: appClientID, ZoneID: "zone-1",
-		Clients: []btpingotest.XSUAAClient{{ClientID: "caller", Secret: "s", Scopes: []string{userScope, "demo!t1.Admin"}}},
+		XSAppName: appName, AppClientID: appClientID, ZoneID: "zone-1", Subdomain: "sub",
+		Clients: []btpingotest.XSUAAClient{{ClientID: "caller", Secret: "s", Scopes: []string{userScope, "demo!t1.Admin", "openid", "uaa.resource"}}},
 		Now:     func() time.Time { return now },
 	})
 	then.AssertThat(t, err, is.Nil())
@@ -159,17 +200,21 @@ func Test_XSUAA_TokenShape(t *testing.T) {
 	tok, _, err := jwt.NewParser().ParseUnverified(raw, claims)
 	then.AssertThat(t, err, is.Nil())
 	then.AssertThat(t, str(tok.Header["alg"]), is.EqualTo("RS256"))
-	then.AssertThat(t, str(tok.Header["kid"]), is.EqualTo(btpingotest.KeyID))
+	then.AssertThat(t, str(tok.Header["kid"]), is.EqualTo("mock-key-1"))
 
 	aud, err := claims.GetAudience()
 	then.AssertThat(t, err, is.Nil())
-	then.AssertThat(t, []string(aud), is.EqualTo([]string{appClientID, "caller"}))
+	then.AssertThat(t, []string(aud), is.EqualTo([]string{"caller", "demo!t1", "openid", "uaa"}))
 	then.AssertThat(t, str(claims["client_id"]), is.EqualTo("caller"))
 	then.AssertThat(t, str(claims["cid"]), is.EqualTo("caller"))
 	then.AssertThat(t, str(claims["grant_type"]), is.EqualTo("client_credentials"))
 	then.AssertThat(t, str(claims["zid"]), is.EqualTo("zone-1"))
-	then.AssertThat(t, str(claims["iss"]), is.EqualTo("http://zone-1.localhost:8080/uaa/oauth/token"))
-	then.AssertThat(t, btpingo.ScopesFromClaims(claims), is.EqualTo([]string{userScope, "demo!t1.Admin"}))
+	then.AssertThat(t, str(claims["iss"]), is.EqualTo("http://sub.localhost:8080/uaa/oauth/token"))
+	then.AssertThat(t, btpingo.ScopesFromClaims(claims), is.EqualTo([]string{userScope, "demo!t1.Admin", "openid", "uaa.resource"}))
+	ext, _ := claims["ext_attr"].(map[string]any)
+	then.AssertThat(t, str(ext["enhancer"]), is.EqualTo("XSUAA"))
+	then.AssertThat(t, str(ext["subaccountid"]), is.EqualTo("zone-1"))
+	then.AssertThat(t, str(ext["zdn"]), is.EqualTo("sub"))
 	then.AssertThat(t, num(claims["iat"]), is.EqualTo(float64(now.Unix())))
 	then.AssertThat(t, num(claims["exp"]), is.EqualTo(float64(now.Add(12*time.Hour).Unix())))
 }
@@ -194,6 +239,8 @@ func Test_XSUAA_TokenEndpointErrors(t *testing.T) {
 		{"form wrong secret", nil, url.Values{"grant_type": {"client_credentials"}, "client_id": {appClientID}, "client_secret": {"x"}}, http.StatusUnauthorized, "unauthorized"},
 		{"basic wins over form", basic(appClientID, "wrong"), url.Values{"grant_type": {"client_credentials"}, "client_id": {appClientID}, "client_secret": {"secret"}}, http.StatusUnauthorized, "unauthorized"},
 		{"wrong grant", basic(appClientID, "secret"), url.Values{"grant_type": {"password"}}, http.StatusBadRequest, "unsupported_grant_type"},
+		{"unknown scope", basic(appClientID, "secret"), url.Values{"grant_type": {"client_credentials"}, "scope": {"uaa.admin"}}, http.StatusBadRequest, "invalid_scope"},
+		{"scope of another client", basic("noscope", "secret3"), url.Values{"grant_type": {"client_credentials"}, "scope": {userScope}}, http.StatusBadRequest, "invalid_scope"},
 		{"missing grant", basic(appClientID, "secret"), nil, http.StatusBadRequest, "unsupported_grant_type"},
 	}
 	for _, c := range cases {
@@ -230,7 +277,7 @@ func Test_XSUAA_JWKS(t *testing.T) {
 	}
 	then.AssertThat(t, json.NewDecoder(resp.Body).Decode(&jwks), is.Nil())
 	then.AssertThat(t, len(jwks.Keys), is.EqualTo(1))
-	then.AssertThat(t, jwks.Keys[0]["kid"], is.EqualTo(btpingotest.KeyID))
+	then.AssertThat(t, jwks.Keys[0]["kid"], is.EqualTo("mock-key-1"))
 	then.AssertThat(t, jwks.Keys[0]["alg"], is.EqualTo("RS256"))
 }
 
@@ -308,3 +355,64 @@ func Test_NewXSUAA_RejectsBadConfig(t *testing.T) {
 func str(v any) string { s, _ := v.(string); return s }
 
 func num(v any) float64 { f, _ := v.(float64); return f }
+
+func Test_XSUAA_AppClientAutoRegistered(t *testing.T) {
+	x, err := btpingotest.NewXSUAA(btpingotest.XSUAAConfig{XSAppName: appName, AppClientID: appClientID})
+	then.AssertThat(t, err, is.Nil())
+	srv := httptest.NewServer(x)
+	t.Cleanup(srv.Close)
+	creds := x.Credentials(srv.URL)
+	var errs []string
+	creds.Validate(&errs)
+	then.AssertThat(t, len(errs), is.EqualTo(0))
+	resp := fetchToken(t, srv.URL, func(req *http.Request) { req.SetBasicAuth(creds.ClientID, creds.ClientSecret) },
+		url.Values{"grant_type": {"client_credentials"}})
+	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusOK))
+}
+
+func Test_XSUAA_BasicCredentialEncoding(t *testing.T) {
+	x, err := btpingotest.NewXSUAA(btpingotest.XSUAAConfig{
+		XSAppName: appName, AppClientID: appClientID,
+		Clients: []btpingotest.XSUAAClient{{ClientID: "sb-a!b", Secret: "p@ss:w/rd", Scopes: []string{"openid"}}},
+	})
+	then.AssertThat(t, err, is.Nil())
+	srv := httptest.NewServer(x)
+	t.Cleanup(srv.Close)
+	grant := url.Values{"grant_type": {"client_credentials"}}
+	cases := []struct {
+		name   string
+		id, pw string
+		header bool
+		status int
+	}{
+		{"raw credentials", "sb-a!b", "p@ss:w/rd", false, http.StatusOK},
+		{"percent-encoded without header is compared raw", "sb-a%21b", "p%40ss%3Aw%2Frd", false, http.StatusUnauthorized},
+		{"percent-encoded with header is decoded", "sb-a%21b", "p%40ss%3Aw%2Frd", true, http.StatusOK},
+		{"raw id, encoded secret, with header", "sb-a!b", "p%40ss%3Aw%2Frd", true, http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := fetchToken(t, srv.URL, func(req *http.Request) {
+				req.SetBasicAuth(c.id, c.pw)
+				if c.header {
+					req.Header.Set("X-CF-ENCODED-CREDENTIALS", "true")
+				}
+			}, grant)
+			then.AssertThat(t, resp.StatusCode, is.EqualTo(c.status))
+		})
+	}
+}
+
+func Test_XSUAA_ConfigurableLifetime(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	x, err := btpingotest.NewXSUAA(btpingotest.XSUAAConfig{
+		XSAppName: appName, AppClientID: appClientID, TokenLifetime: time.Minute, Now: func() time.Time { return now },
+	})
+	then.AssertThat(t, err, is.Nil())
+	raw, err := x.MintToken(appClientID)
+	then.AssertThat(t, err, is.Nil())
+	claims := jwt.MapClaims{}
+	_, _, err = jwt.NewParser().ParseUnverified(raw, claims)
+	then.AssertThat(t, err, is.Nil())
+	then.AssertThat(t, num(claims["exp"]), is.EqualTo(float64(now.Add(time.Minute).Unix())))
+}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -26,14 +27,15 @@ const (
 	// TokenPath is where the mock serves the client_credentials grant.
 	TokenPath = "/oauth/token"
 
-	// TokenLifetime is the lifetime of the tokens the mock issues
-	// (XSUAA's default for access tokens is 12 h).
-	TokenLifetime = 12 * time.Hour
+	// DefaultTokenLifetime is the lifetime of the tokens the mock issues
+	// unless XSUAAConfig.TokenLifetime says otherwise (XSUAA's default for
+	// access tokens is 12 h).
+	DefaultTokenLifetime = 12 * time.Hour
 
-	// KeyID is the "kid" of the mock's signing key.
-	KeyID = "mock-key-1"
+	keyID = "mock-key-1"
 
-	defaultZoneID = "mock-zone"
+	defaultZoneID    = "mock-zone"
+	defaultSubdomain = "mock"
 )
 
 // XSUAAClient is a caller the mock XSUAA knows: a client ID with its
@@ -53,10 +55,19 @@ type XSUAAConfig struct {
 	// service key calls clientid, "sb-<xsappname>"). Every token carries
 	// it in "aud", which is what btpingo.JWTValidator checks.
 	AppClientID string
-	// Clients are the callers that may fetch tokens.
+	// Clients are the callers that may fetch tokens. If the application's
+	// own client (AppClientID) is not among them, NewXSUAA adds it with no
+	// scopes and a generated secret, so Credentials is always usable at the
+	// token endpoint.
 	Clients []XSUAAClient
 	// ZoneID is the identity zone ("zid" claim). Default "mock-zone".
 	ZoneID string
+	// Subdomain is the tenant subdomain, used in "iss" and "ext_attr.zdn".
+	// Default "mock".
+	Subdomain string
+	// TokenLifetime is the lifetime of issued tokens. Default
+	// DefaultTokenLifetime (12 h).
+	TokenLifetime time.Duration
 	// Now is the clock for iat/exp. Default time.Now.
 	Now func() time.Time
 }
@@ -66,6 +77,19 @@ type XSUAAConfig struct {
 // (POST /oauth/token). It is an http.Handler that can be mounted on any
 // mux; it runs no server of its own. It is meant for tests and local
 // mocks only and must never be wired into a production binary.
+//
+// Token shape, as measured against a real XSUAA for a client_credentials
+// token: "aud" holds the caller's own client ID plus the namespaces of the
+// granted scopes ("myapp!t1" for "myapp!t1.User", "openid" for "openid"),
+// not the application's client ID unless the caller is that client.
+//
+// Known consequence with btpingo's current validator: JWTValidator
+// requires the application's client ID in "aud". A token of a foreign
+// client that was granted the application's scope (grant-as-authority-to-apps)
+// carries aud [foreign-id, "<xsappname>"] and is therefore rejected with
+// 401; only tokens of the application's own client pass. This is a
+// suspected production limitation, pinned by a test, not yet verified
+// against a real XSUAA.
 type XSUAA struct {
 	cfg XSUAAConfig
 	key *rsa.PrivateKey
@@ -95,14 +119,25 @@ func NewXSUAA(cfg XSUAAConfig) (*XSUAA, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Subdomain == "" {
+		cfg.Subdomain = defaultSubdomain
+	}
+	if cfg.TokenLifetime <= 0 {
+		cfg.TokenLifetime = DefaultTokenLifetime
+	}
 	cfg.Clients = slices.Clone(cfg.Clients)
+	if !seen[cfg.AppClientID] {
+		var sec [16]byte
+		_, _ = rand.Read(sec[:])
+		cfg.Clients = append(cfg.Clients, XSUAAClient{ClientID: cfg.AppClientID, Secret: hex.EncodeToString(sec[:])})
+	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("btpingotest: generate rsa key: %w", err)
 	}
 	jwks, err := json.Marshal(map[string]any{"keys": []map[string]string{{
 		"kty": "RSA",
-		"kid": KeyID,
+		"kid": keyID,
 		"alg": "RS256",
 		"use": "sig",
 		"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
@@ -119,9 +154,9 @@ func NewXSUAA(cfg XSUAAConfig) (*XSUAA, error) {
 // under, without trailing path). It passes Validate, and
 // btpingo.NewJWTValidator fetches the JWKS from baseURL + "/token_keys".
 // ClientID is the application client ID; ClientSecret is that client's
-// secret if it is in the client list, otherwise a fixed placeholder.
+// secret (generated if the client was not configured).
 func (x *XSUAA) Credentials(baseURL string) *btpingo.XSUAACredentials {
-	secret := "mock-secret"
+	var secret string
 	for _, c := range x.cfg.Clients {
 		if c.ClientID == x.cfg.AppClientID {
 			secret = c.Secret
@@ -138,20 +173,46 @@ func (x *XSUAA) Credentials(baseURL string) *btpingo.XSUAACredentials {
 }
 
 // MintToken returns a signed token for a configured client, as the
-// client_credentials grant would, without HTTP.
-func (x *XSUAA) MintToken(clientID string) (string, error) {
+// client_credentials grant would, without HTTP. Without scopes the token
+// carries all of the client's scopes; with scopes it is narrowed to them
+// like the "scope" form parameter (an ungranted scope is an error).
+func (x *XSUAA) MintToken(clientID string, scopes ...string) (string, error) {
 	c, ok := x.client(clientID)
 	if !ok {
 		return "", fmt.Errorf("btpingotest: unknown client %q", clientID)
 	}
-	return x.Sign(x.claims(c))
+	granted, err := narrow(c.Scopes, scopes)
+	if err != nil {
+		return "", err
+	}
+	return x.Sign(x.claims(c, granted))
+}
+
+// narrow returns the intersection semantics of UAA: requested scopes must
+// all be granted; none requested means all granted.
+func narrow(granted, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return slices.Clone(granted), nil
+	}
+	out := make([]string, 0, len(requested))
+	for _, r := range requested {
+		if !slices.Contains(granted, r) {
+			return nil, fmt.Errorf("btpingotest: scope %q is not granted to the client", r)
+		}
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // Sign signs arbitrary claims with the mock's key (RS256, header kid), for
-// tests of rejected tokens (expired, foreign audience, ...).
+// tests of rejected tokens (expired, foreign audience, ...). The claims
+// type comes from github.com/golang-jwt/jwt/v5, so this method exposes
+// that module in btpingotest's API.
 func (x *XSUAA) Sign(claims jwt.Claims) (string, error) {
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	tok.Header["kid"] = KeyID
+	tok.Header["kid"] = keyID
 	return tok.SignedString(x.key)
 }
 
@@ -192,6 +253,17 @@ func (x *XSUAA) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// Credentials: HTTP Basic wins, form fields are the fallback.
 	id, secret, ok := r.BasicAuth()
+	if ok && strings.EqualFold(r.Header.Get("X-CF-ENCODED-CREDENTIALS"), "true") {
+		// Like UAA: only with this header are Basic credentials
+		// percent-decoded; otherwise they are compared raw.
+		var e1, e2 error
+		id, e1 = url.QueryUnescape(id)
+		secret, e2 = url.QueryUnescape(secret)
+		if e1 != nil || e2 != nil {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Malformed encoded credentials")
+			return
+		}
+	}
 	if !ok {
 		id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 	}
@@ -207,7 +279,12 @@ func (x *XSUAA) serveToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant type: "+g)
 		return
 	}
-	cl := x.claims(c)
+	granted, err := narrow(c.Scopes, strings.Fields(r.PostForm.Get("scope")))
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "Invalid scope: "+r.PostForm.Get("scope"))
+		return
+	}
+	cl := x.claims(c, granted)
 	raw, err := x.Sign(cl)
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "token signing failed")
@@ -218,8 +295,8 @@ func (x *XSUAA) serveToken(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"access_token": raw,
 		"token_type":   "bearer",
-		"expires_in":   int(TokenLifetime / time.Second),
-		"scope":        strings.Join(c.Scopes, " "),
+		"expires_in":   int(x.cfg.TokenLifetime/time.Second) - 1,
+		"scope":        strings.Join(granted, " "),
 		"jti":          cl["jti"],
 	})
 }
@@ -240,12 +317,19 @@ func (x *XSUAA) client(id string) (XSUAAClient, bool) {
 }
 
 // claims builds the claims of a client_credentials token the way XSUAA
-// shapes them.
-func (x *XSUAA) claims(c XSUAAClient) jwt.MapClaims {
+// shapes them. aud is the caller's client ID plus the namespaces of the
+// granted scopes.
+func (x *XSUAA) claims(c XSUAAClient, scopes []string) jwt.MapClaims {
 	now := x.cfg.Now()
-	aud := []string{x.cfg.AppClientID}
-	if c.ClientID != x.cfg.AppClientID {
-		aud = append(aud, c.ClientID)
+	aud := []string{c.ClientID}
+	for _, sc := range scopes {
+		ns := sc
+		if i := strings.LastIndexByte(sc, '.'); i >= 0 {
+			ns = sc[:i]
+		}
+		if !slices.Contains(aud, ns) {
+			aud = append(aud, ns)
+		}
 	}
 	var jti [16]byte
 	_, _ = rand.Read(jti[:])
@@ -256,12 +340,17 @@ func (x *XSUAA) claims(c XSUAAClient) jwt.MapClaims {
 		"cid":        c.ClientID,
 		"azp":        c.ClientID,
 		"grant_type": "client_credentials",
-		"scope":      append([]string{}, c.Scopes...),
+		"scope":      append([]string{}, scopes...),
 		"aud":        aud,
 		// XSUAA's internal issuer literal, not a reachable URL.
-		"iss": "http://" + x.cfg.ZoneID + ".localhost:8080/uaa/oauth/token",
+		"iss": "http://" + x.cfg.Subdomain + ".localhost:8080/uaa/oauth/token",
 		"zid": x.cfg.ZoneID,
+		"ext_attr": map[string]string{
+			"enhancer":     "XSUAA",
+			"subaccountid": x.cfg.ZoneID,
+			"zdn":          x.cfg.Subdomain,
+		},
 		"iat": now.Unix(),
-		"exp": now.Add(TokenLifetime).Unix(),
+		"exp": now.Add(x.cfg.TokenLifetime).Unix(),
 	}
 }

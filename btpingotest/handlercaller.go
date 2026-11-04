@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/hochfrequenz/btpingo"
 	"github.com/hochfrequenz/btpingo/internal/fwdheader"
 	"github.com/hochfrequenz/btpingo/internal/limitbody"
+	"github.com/hochfrequenz/btpingo/internal/onprem"
 	"github.com/hochfrequenz/btpingo/internal/pathsuffix"
 )
 
@@ -18,37 +22,61 @@ import (
 // unless WithDestinationName says otherwise.
 const DefaultDestinationName = "SAP"
 
-// mockHost is the Host of the requests a HandlerCaller hands to its handler.
-const mockHost = "sap.mock"
+var (
+	_ btpingo.OnPremCaller  = (*HandlerCaller)(nil)
+	_ btpingo.OnPremMutator = (*HandlerCaller)(nil)
+)
 
-var _ btpingo.OnPremCaller = (*HandlerCaller)(nil)
-
-// HandlerCaller is a btpingo.OnPremCaller that serves an http.Handler
-// in-process instead of calling a SAP system through the Cloud
-// Connector. It behaves like btpingo.Service.CallOnPremise wherever a
-// caller can see it:
+// HandlerCaller is a btpingo.OnPremCaller and btpingo.OnPremMutator that
+// serves an http.Handler in-process instead of calling a SAP system
+// through the Cloud Connector. The handler sits behind a real HTTP
+// server on a loopback port and is called by a real http.Client set up
+// like the one of btpingo.Service, so what a caller can observe is what
+// the Service would give:
 //
 //   - the destination name must match, otherwise the error wraps
-//     btpingo.ErrDestinationNotFound, as the Destination service lookup
-//     does;
+//     btpingo.ErrDestinationNotFound, as the Destination service lookup does;
 //   - the same path-suffix rules (no ".." and no "%");
 //   - inbound headers are filtered as Service does (Authorization, hop-by-hop
 //     headers and Host dropped, Cookie reduced to SAP session cookies) and
 //     User-Agent defaults to btpingo.DefaultUserAgent;
-//   - the response body is capped (default
-//     btpingo.DefaultOnPremResponseSizeLimit); reading past the cap yields
-//     btpingo.ErrOnPremResponseTooLarge;
+//   - same-origin redirects are followed, cross-origin ones fail with
+//     btpingo.ErrOnPremCrossOriginRedirect, at most 10 hops;
+//   - real HTTP semantics: Content-Length, Date, HEAD, transparent gzip
+//     decoding, transport errors as *url.Error;
+//   - the response body is capped (default btpingo.DefaultOnPremResponseSizeLimit);
+//     reading past the cap yields btpingo.ErrOnPremResponseTooLarge;
+//   - a 401 is retried once when the call has no body;
+//   - CallOnPremiseMutating runs the same CSRF handshake as the Service;
 //   - the context is honoured.
 //
-// Differences: the handler's answer is buffered before it is returned (no
-// streaming), there is no retry on 401 and no CSRF handling.
-// Safe for concurrent use if the handler is.
+// Not mirrored: destination, connectivity and authenticator handling
+// (the handler sees no Authorization header from them) and the
+// Cloud Connector proxy.
+//
+// The call crosses a real HTTP connection, so values of the caller's
+// context do not reach the handler (only its cancellation does).
+// A handler that ignores its request context keeps running (and its
+// goroutine lives) until it returns, even after the call has returned
+// with the context error.
+//
+// Call Close when done. Safe for concurrent use if the handler is.
+// For tests and local mocks only; never import btpingotest in production code.
 type HandlerCaller struct {
 	handler   http.Handler
 	dest      string
 	limit     int64
 	userAgent string
+	timeout   time.Duration
 	fault     func(*http.Request) error
+	csrfPath  string
+
+	csrf   *onprem.CSRF
+	client *http.Client
+	tr     *http.Transport
+	srv    *http.Server
+	base   string
+	once   sync.Once
 }
 
 // HandlerCallerOption configures NewHandlerCaller.
@@ -82,31 +110,80 @@ func WithUserAgent(ua string) HandlerCallerOption {
 	}
 }
 
-// WithTransportFault installs a hook that runs on every call after the
-// request has been built (so it sees the filtered headers) and before
-// the handler. A non-nil error is returned from CallOnPremise as if the
-// transport had failed before any response, and the handler is not run.
+// WithTimeout sets the client timeout of a call, like
+// btpingo.WithOnPremiseTimeout (default btpingo.DefaultOnPremiseTimeout).
+// Zero keeps the default.
+func WithTimeout(d time.Duration) HandlerCallerOption {
+	return func(c *HandlerCaller) {
+		if d != 0 {
+			c.timeout = d
+		}
+	}
+}
+
+// WithCSRFFetchPath sets the path of the CSRF token fetch, like
+// btpingo.WithCSRFFetchPath (default btpingo.DefaultCSRFFetchPath).
+func WithCSRFFetchPath(path string) HandlerCallerOption {
+	return func(c *HandlerCaller) {
+		if path != "" {
+			c.csrfPath = path
+		}
+	}
+}
+
+// WithTransportFault installs a hook that runs on every request after
+// it has been built (so it sees the filtered headers) and before it is
+// sent. A non-nil error is returned from the call as if the transport
+// had failed before any response, and the handler is not run.
 func WithTransportFault(fn func(req *http.Request) error) HandlerCallerOption {
 	return func(c *HandlerCaller) { c.fault = fn }
 }
 
-// WithTransportError makes every call fail with err before any response.
-func WithTransportError(err error) HandlerCallerOption {
-	return WithTransportFault(func(*http.Request) error { return err })
-}
-
-// NewHandlerCaller returns a HandlerCaller serving h.
-func NewHandlerCaller(h http.Handler, opts ...HandlerCallerOption) *HandlerCaller {
+// NewHandlerCaller starts a loopback server for h and returns a caller
+// for it. It fails only if no loopback port can be opened.
+func NewHandlerCaller(h http.Handler, opts ...HandlerCallerOption) (*HandlerCaller, error) {
 	c := &HandlerCaller{
 		handler:   h,
 		dest:      DefaultDestinationName,
 		limit:     btpingo.DefaultOnPremResponseSizeLimit,
 		userAgent: btpingo.DefaultUserAgent,
+		timeout:   btpingo.DefaultOnPremiseTimeout,
+		csrfPath:  btpingo.DefaultCSRFFetchPath,
 	}
 	for _, o := range opts {
 		o(c)
 	}
-	return c
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("btpingotest: listen: %w", err)
+	}
+	c.base = "http://" + ln.Addr().String()
+	c.srv = &http.Server{
+		Handler: h,
+		// A panicking handler aborts the connection like on any server; keep
+		// the stack trace out of test output.
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	go func() { _ = c.srv.Serve(ln) }()
+
+	c.tr = http.DefaultTransport.(*http.Transport).Clone()
+	c.tr.Proxy = nil
+	c.client = &http.Client{
+		Transport:     c.tr,
+		Timeout:       c.timeout,
+		CheckRedirect: onprem.RedirectPolicy(btpingo.ErrOnPremCrossOriginRedirect),
+	}
+	c.csrf = onprem.NewCSRF(c.csrfPath)
+	return c, nil
+}
+
+// Close stops the server and drops idle connections. It does not wait for
+// running handlers. Calling it more than once is fine.
+func (c *HandlerCaller) Close() {
+	c.once.Do(func() {
+		c.tr.CloseIdleConnections()
+		_ = c.srv.Close()
+	})
 }
 
 // CallOnPremise implements btpingo.OnPremCaller.
@@ -117,11 +194,28 @@ func (c *HandlerCaller) CallOnPremise(ctx context.Context, destName, method, pat
 	if destName != c.dest {
 		return nil, fmt.Errorf("destination lookup: %w", fmt.Errorf("%w: %q", btpingo.ErrDestinationNotFound, destName))
 	}
-	if err := ctx.Err(); err != nil {
+	resp, err := c.callOnce(ctx, method, pathSuffix, headers, body)
+	if err != nil {
 		return nil, err
 	}
+	// Same retry decision as Service: one more attempt on 401 when the
+	// caller handed over no body.
+	if onprem.Retry401(resp.StatusCode, body) {
+		_ = resp.Body.Close()
+		return c.callOnce(ctx, method, pathSuffix, headers, nil)
+	}
+	return resp, nil
+}
 
-	target := "http://" + mockHost
+// CallOnPremiseMutating implements btpingo.OnPremMutator with the same
+// CSRF handshake as btpingo.Service (token fetch, session cookies, one
+// retry on 403 with X-CSRF-Token: Required); the logic is shared.
+func (c *HandlerCaller) CallOnPremiseMutating(ctx context.Context, destName, method, pathSuffix string, headers http.Header, body io.Reader) (*http.Response, error) {
+	return c.csrf.Do(ctx, c.CallOnPremise, destName, method, pathSuffix, headers, body)
+}
+
+func (c *HandlerCaller) callOnce(ctx context.Context, method, pathSuffix string, headers http.Header, body io.Reader) (*http.Response, error) {
+	target := c.base
 	if pathSuffix != "" {
 		if !strings.HasPrefix(pathSuffix, "/") {
 			pathSuffix = "/" + pathSuffix
@@ -136,54 +230,15 @@ func (c *HandlerCaller) CallOnPremise(ctx context.Context, destName, method, pat
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
-	// Make it look like a server-side request (a server never sees an empty path).
-	if req.URL.Path == "" {
-		req.URL.Path = "/"
-	}
-	req.RequestURI = req.URL.RequestURI()
-	req.RemoteAddr = "192.0.2.1:1234"
-	if req.Body == nil {
-		req.Body = http.NoBody
-	}
-
 	if c.fault != nil {
 		if err := c.fault(req); err != nil {
 			return nil, err
 		}
 	}
-
-	// The handler runs in its own goroutine and owns the recorder; if the
-	// context ends first we return without touching it, so a handler that
-	// ignores its context cannot make the caller hang or race.
-	type result struct {
-		resp *http.Response
-		err  error
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
 	}
-	done := make(chan result, 1)
-	go func() {
-		rec := httptest.NewRecorder()
-		defer func() {
-			if p := recover(); p != nil {
-				done <- result{err: fmt.Errorf("on-prem handler panicked: %v", p)}
-			}
-		}()
-		c.handler.ServeHTTP(rec, req)
-		done <- result{resp: rec.Result()}
-	}()
-
-	select {
-	case r := <-done:
-		if r.err != nil {
-			return nil, r.err
-		}
-		if err := ctx.Err(); err != nil {
-			_ = r.resp.Body.Close()
-			return nil, err
-		}
-		r.resp.Request = req
-		r.resp.Body = limitbody.New(r.resp.Body, c.limit, btpingo.ErrOnPremResponseTooLarge)
-		return r.resp, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	resp.Body = limitbody.New(resp.Body, c.limit, btpingo.ErrOnPremResponseTooLarge)
+	return resp, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,16 +17,24 @@ import (
 	"github.com/hochfrequenz/btpingo/btpingotest"
 )
 
+// newCaller starts a HandlerCaller that is closed with the test.
+func newCaller(t *testing.T, h http.Handler, opts ...btpingotest.HandlerCallerOption) *btpingotest.HandlerCaller {
+	t.Helper()
+	c, err := btpingotest.NewHandlerCaller(h, opts...)
+	then.AssertThat(t, err, is.Nil())
+	t.Cleanup(c.Close)
+	return c
+}
+
 type seen struct {
 	method, path, query, uri, host, body string
 	header                               http.Header
-	hasCtx                               bool
 }
 
 func recordingHandler(out *seen) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		*out = seen{r.Method, r.URL.Path, r.URL.RawQuery, r.RequestURI, r.Host, string(b), r.Header.Clone(), r.Context() != nil}
+		*out = seen{r.Method, r.URL.Path, r.URL.RawQuery, r.RequestURI, r.Host, string(b), r.Header.Clone()}
 		w.Header().Set("X-Answer", "42")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("hello"))
@@ -34,7 +43,7 @@ func recordingHandler(out *seen) http.Handler {
 
 func Test_HandlerCaller_RequestReachesHandlerIntact(t *testing.T) {
 	var got seen
-	c := btpingotest.NewHandlerCaller(recordingHandler(&got))
+	c := newCaller(t, recordingHandler(&got))
 	h := http.Header{}
 	h.Set("X-Custom", "a")
 	h.Add("X-Multi", "1")
@@ -70,7 +79,7 @@ func Test_HandlerCaller_PathSuffixForms(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
 			var got seen
-			cl := btpingotest.NewHandlerCaller(recordingHandler(&got))
+			cl := newCaller(t, recordingHandler(&got))
 			resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, c.in, nil, nil)
 			then.AssertThat(t, err, is.Nil())
 			_ = resp.Body.Close()
@@ -84,7 +93,7 @@ func Test_HandlerCaller_PathSuffixForms(t *testing.T) {
 }
 
 func Test_HandlerCaller_RejectsLikeService(t *testing.T) {
-	c := btpingotest.NewHandlerCaller(http.NotFoundHandler())
+	c := newCaller(t, http.NotFoundHandler())
 	for _, p := range []string{"/a/../b", "/a/%2e%2e/b", "/a%20b"} {
 		t.Run(p, func(t *testing.T) {
 			resp, err := c.CallOnPremise(context.Background(), "SAP", http.MethodGet, p, nil, nil)
@@ -141,7 +150,7 @@ func Test_HandlerCaller_HeaderFiltering(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var got seen
-			cl := btpingotest.NewHandlerCaller(recordingHandler(&got))
+			cl := newCaller(t, recordingHandler(&got))
 			resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", c.in, nil)
 			then.AssertThat(t, err, is.Nil())
 			_ = resp.Body.Close()
@@ -151,14 +160,15 @@ func Test_HandlerCaller_HeaderFiltering(t *testing.T) {
 			for _, k := range c.absent {
 				then.AssertThat(t, len(got.header.Values(k)), is.EqualTo(0))
 			}
-			then.AssertThat(t, got.host, is.Not(is.EqualTo("evil.example")))
+			then.AssertThat(t, strings.HasPrefix(got.host, "127.0.0.1:"), is.True())
+			then.AssertThat(t, len(got.header.Values("Host")), is.EqualTo(0))
 		})
 	}
 }
 
 func Test_HandlerCaller_UserAgentOption(t *testing.T) {
 	var got seen
-	cl := btpingotest.NewHandlerCaller(recordingHandler(&got), btpingotest.WithUserAgent("svc/9"))
+	cl := newCaller(t, recordingHandler(&got), btpingotest.WithUserAgent("svc/9"))
 	resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
 	then.AssertThat(t, err, is.Nil())
 	_ = resp.Body.Close()
@@ -181,7 +191,7 @@ func Test_HandlerCaller_ResponseSizeLimit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cl := btpingotest.NewHandlerCaller(big, c.opts...)
+			cl := newCaller(t, big, c.opts...)
 			resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
 			then.AssertThat(t, err, is.Nil())
 			defer func() { _ = resp.Body.Close() }()
@@ -199,7 +209,7 @@ func Test_HandlerCaller_DefaultLimitIsLibraryDefault(t *testing.T) {
 	over := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(make([]byte, btpingo.DefaultOnPremResponseSizeLimit+1))
 	})
-	resp, err := btpingotest.NewHandlerCaller(over).CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
+	resp, err := newCaller(t, over).CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
 	then.AssertThat(t, err, is.Nil())
 	defer func() { _ = resp.Body.Close() }()
 	_, err = io.ReadAll(resp.Body)
@@ -223,7 +233,7 @@ func Test_HandlerCaller_Destination(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			called := false
 			h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
-			cl := btpingotest.NewHandlerCaller(h, c.opts...)
+			cl := newCaller(t, h, c.opts...)
 			resp, err := cl.CallOnPremise(context.Background(), c.dest, http.MethodGet, "/x", nil, nil)
 			if c.wantErr {
 				then.AssertThat(t, errors.Is(err, btpingo.ErrDestinationNotFound), is.True())
@@ -241,17 +251,19 @@ func Test_HandlerCaller_Destination(t *testing.T) {
 
 func Test_HandlerCaller_TransportFailure(t *testing.T) {
 	boom := errors.New("connection refused")
-	t.Run("static", func(t *testing.T) {
+	t.Run("every call", func(t *testing.T) {
 		called := false
-		cl := btpingotest.NewHandlerCaller(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }),
-			btpingotest.WithTransportError(boom))
+		cl := newCaller(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }),
+			btpingotest.WithTransportFault(func(*http.Request) error { return boom }))
 		resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
 		then.AssertThat(t, resp == nil, is.True())
 		then.AssertThat(t, errors.Is(err, boom), is.True())
 		then.AssertThat(t, called, is.False())
+		kind, _ := btpingo.ClassifyOnPremError(err)
+		then.AssertThat(t, kind, is.EqualTo(btpingo.OnPremFailureTransport))
 	})
 	t.Run("per request", func(t *testing.T) {
-		cl := btpingotest.NewHandlerCaller(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		cl := newCaller(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
 			btpingotest.WithTransportFault(func(r *http.Request) error {
 				if r.URL.Path == "/down" {
 					return boom
@@ -275,7 +287,7 @@ func Test_HandlerCaller_Context(t *testing.T) {
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		resp, err := btpingotest.NewHandlerCaller(h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
+		resp, err := newCaller(t, h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
 		then.AssertThat(t, resp == nil, is.True())
 		then.AssertThat(t, errors.Is(err, context.DeadlineExceeded), is.True())
 		select {
@@ -292,7 +304,7 @@ func Test_HandlerCaller_Context(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() { <-started; cancel() }()
-		_, err := btpingotest.NewHandlerCaller(h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
+		_, err := newCaller(t, h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
 		then.AssertThat(t, errors.Is(err, context.Canceled), is.True())
 	})
 	t.Run("handler ignoring ctx does not hang the caller", func(t *testing.T) {
@@ -301,7 +313,7 @@ func Test_HandlerCaller_Context(t *testing.T) {
 		h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release })
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		defer cancel()
-		_, err := btpingotest.NewHandlerCaller(h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
+		_, err := newCaller(t, h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
 		then.AssertThat(t, errors.Is(err, context.DeadlineExceeded), is.True())
 	})
 	t.Run("already cancelled", func(t *testing.T) {
@@ -309,27 +321,41 @@ func Test_HandlerCaller_Context(t *testing.T) {
 		h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := btpingotest.NewHandlerCaller(h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
+		_, err := newCaller(t, h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
 		then.AssertThat(t, errors.Is(err, context.Canceled), is.True())
 		then.AssertThat(t, called, is.False())
 	})
-	t.Run("ctx values reach the handler", func(t *testing.T) {
-		type key struct{}
-		var v any
-		h := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { v = r.Context().Value(key{}) })
-		ctx := context.WithValue(context.Background(), key{}, "x")
-		resp, err := btpingotest.NewHandlerCaller(h).CallOnPremise(ctx, "SAP", http.MethodGet, "/x", nil, nil)
-		then.AssertThat(t, err, is.Nil())
-		_ = resp.Body.Close()
-		then.AssertThat(t, v == "x", is.True())
-	})
 }
 
-func Test_HandlerCaller_HandlerPanicIsATransportError(t *testing.T) {
-	h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("kaputt") })
-	resp, err := btpingotest.NewHandlerCaller(h).CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
-	then.AssertThat(t, resp == nil, is.True())
-	then.AssertThat(t, err, is.Not(is.Nil()))
+func Test_HandlerCaller_HandlerPanicAndGoexitAreTransportErrors(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"panic":                func(http.ResponseWriter, *http.Request) { panic("kaputt") },
+		"runtime.Goexit":       func(http.ResponseWriter, *http.Request) { runtime.Goexit() },
+		"http.ErrAbortHandler": func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) },
+	}
+	for name, h := range cases {
+		t.Run(name, func(t *testing.T) {
+			type res struct {
+				resp *http.Response
+				err  error
+			}
+			ch := make(chan res, 1)
+			cl := newCaller(t, h)
+			go func() {
+				resp, err := cl.CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
+				ch <- res{resp, err}
+			}()
+			select {
+			case r := <-ch:
+				then.AssertThat(t, r.resp == nil, is.True())
+				then.AssertThat(t, r.err, is.Not(is.Nil()))
+				kind, _ := btpingo.ClassifyOnPremError(r.err)
+				then.AssertThat(t, kind, is.EqualTo(btpingo.OnPremFailureTransport))
+			case <-time.After(10 * time.Second):
+				t.Fatal("CallOnPremise hangs")
+			}
+		})
+	}
 }
 
 func Test_HandlerCaller_NoBodyAndImplicitStatus(t *testing.T) {
@@ -338,7 +364,7 @@ func Test_HandlerCaller_NoBodyAndImplicitStatus(t *testing.T) {
 		n = r.ContentLength
 		_, _ = w.Write([]byte("ok"))
 	})
-	resp, err := btpingotest.NewHandlerCaller(h).CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
+	resp, err := newCaller(t, h).CallOnPremise(context.Background(), "SAP", http.MethodGet, "/x", nil, nil)
 	then.AssertThat(t, err, is.Nil())
 	_ = resp.Body.Close()
 	then.AssertThat(t, resp.StatusCode, is.EqualTo(http.StatusOK))
