@@ -65,6 +65,7 @@ type Service struct {
 	onPremClient            *http.Client
 	userAgent               string
 	onPremResponseSizeLimit int64
+	noRetry401              bool
 
 	// csrf runs the CSRF handshake of CallOnPremiseMutating.
 	csrf *onprem.CSRF
@@ -142,6 +143,7 @@ type serviceOptions struct {
 	csrfFetchPath           string
 	onPremResponseSizeLimit int64
 	destinationCacheTTL     time.Duration
+	noRetry401              bool
 }
 
 // WithUserAgent sets the User-Agent header for outbound on-prem requests.
@@ -187,6 +189,17 @@ func WithOnPremResponseSizeLimit(bytes int64) ServiceOption {
 // Zero or negative resets to DefaultDestinationCacheTTL.
 func WithDestinationCacheTTL(d time.Duration) ServiceOption {
 	return func(o *serviceOptions) { o.destinationCacheTTL = d }
+}
+
+// WithRetry401 controls the one replay of a body-less call after a 401.
+// The default is true: CallOnPremise drops the cached connectivity token
+// and destination and repeats the call once. Pass false to return the
+// first 401 as-is (the caches are still dropped, so the next call looks
+// both up fresh). Use false when a replay is costly, e.g. a wrong
+// destination password would otherwise cost two failed logons per call
+// and risk locking the SAP user. Body-carrying calls are never replayed.
+func WithRetry401(retry bool) ServiceOption {
+	return func(o *serviceOptions) { o.noRetry401 = !retry }
 }
 
 // NewService wires a Service using the defaults listed in DefaultMgmtTimeout,
@@ -257,6 +270,7 @@ func NewService(env *Env, opts ...ServiceOption) (*Service, error) {
 		onPremClient:            &http.Client{Transport: transport, Timeout: o.onPremiseTimeout, CheckRedirect: checkOnPremRedirect},
 		userAgent:               o.userAgent,
 		onPremResponseSizeLimit: o.onPremResponseSizeLimit,
+		noRetry401:              o.noRetry401,
 		csrf:                    onprem.NewCSRF(o.csrfFetchPath),
 	}, nil
 }
@@ -283,6 +297,9 @@ func (s *Service) Authenticators() *AuthenticatorRegistry { return s.authenticat
 // either cache: it means "authenticated but not authorized", which a
 // fresh token cannot fix and re-trying would mask real
 // auth-policy bugs.
+// WithRetry401(false) switches that single replay off. Use Origin401 on
+// a 401 response to tell the connectivity proxy's rejection from the
+// on-prem system's.
 // The returned response body must be closed by the caller.
 //
 // The returned resp.Body is capped at DefaultOnPremResponseSizeLimit
@@ -323,7 +340,7 @@ func (s *Service) CallOnPremise(ctx context.Context, destName, method, pathSuffi
 	// handed us nil — safer than silently draining and re-seeking. A
 	// body-carrying call that gets a 401 returns it as-is; the cache
 	// invalidation above still lets the next call heal itself.
-	if onprem.Retry401(resp.StatusCode, body) {
+	if !s.noRetry401 && onprem.Retry401(resp.StatusCode, body) {
 		_ = resp.Body.Close()
 		dest, err = s.destinations.Lookup(ctx, s.env.Dest, destToken, destName)
 		if err != nil {

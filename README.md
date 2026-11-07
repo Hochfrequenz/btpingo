@@ -55,6 +55,12 @@ api.GET("/ping", func(c *gin.Context) {
 })
 ```
 
+### 401 handling
+
+On a 401, `CallOnPremise` drops the cached connectivity token and destination. A body-less call is then replayed once with fresh values; a call with a body is not replayed (the next call heals itself). The replay costs a second logon at the SAP system when the destination password is wrong. `btpingo.WithRetry401(false)` returns the first 401 as-is (caches are still dropped); `btpingotest.WithRetry401(false)` does the same for `HandlerCaller`.
+
+`btpingo.Origin401(resp)` tells where a 401 came from, from the headers alone: `Origin401OnPrem` if the response has a `WWW-Authenticate` challenge (the ICF node rejected the credentials), `Origin401Proxy` if it has none (most likely the connectivity proxy rejected btpingo's bearer token, which self-heals), `Origin401None` for any other status. This is a heuristic: it relies on RFC 9110 requiring a challenge on an origin server's 401, and an on-prem system that omits it is reported as `Origin401Proxy`. Act on a rejected logon (e.g. open a circuit breaker) only on `Origin401OnPrem`.
+
 Handlers should depend on the `OnPremCaller` (reads) or `OnPremMutator` (writes with CSRF) interface, not on `*Service`. Then a test can pass a one-method fake.
 
 The full API surface is listed in the package documentation: [`btpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo), [`btpingo/ginpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/ginpingo), [`btpingo/grpcpingo`](https://pkg.go.dev/github.com/hochfrequenz/btpingo/grpcpingo).
