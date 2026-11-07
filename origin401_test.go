@@ -97,3 +97,18 @@ func Test_Origin401_NotA401(t *testing.T) {
 	then.AssertThat(t, btpingo.Origin401(nil), is.EqualTo(btpingo.Origin401None))
 	then.AssertThat(t, btpingo.Origin401(&http.Response{StatusCode: 403, Header: http.Header{"Www-Authenticate": {"Basic"}}}), is.EqualTo(btpingo.Origin401None))
 }
+
+// Default: the body-less 401 is replayed once (two requests), mirroring Service.
+func Test_HandlerCaller_DefaultRetry401_TwoRequestsOn401(t *testing.T) {
+	var n atomic.Int32
+	c, err := btpingotest.NewHandlerCaller(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	then.AssertThat(t, err, is.Nil())
+	defer c.Close()
+	resp, err := c.CallOnPremise(context.Background(), btpingotest.DefaultDestinationName, http.MethodGet, "/x", nil, nil)
+	then.AssertThat(t, err, is.Nil())
+	_ = resp.Body.Close()
+	then.AssertThat(t, int(n.Load()), is.EqualTo(2))
+}

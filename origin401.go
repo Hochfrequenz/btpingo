@@ -36,6 +36,10 @@ func (k Origin401Kind) String() string {
 // with one (Basic realm=...). A caller that must not act on a bearer
 // race (e.g. open a circuit breaker to protect the SAP user from a lock)
 // should act only on Origin401OnPrem.
+//
+// The proxy's actual answer has not been verified against a live system
+// and must be checked before relying on this. 407 and 403 are not
+// classified (returns Origin401None).
 func Origin401(resp *http.Response) Origin401Kind {
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		return Origin401None
