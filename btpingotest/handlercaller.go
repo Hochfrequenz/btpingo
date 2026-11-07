@@ -70,6 +70,7 @@ type HandlerCaller struct {
 	timeout   time.Duration
 	fault     func(*http.Request) error
 	csrfPath  string
+	noRetry   bool
 
 	csrf   *onprem.CSRF
 	client *http.Client
@@ -129,6 +130,12 @@ func WithCSRFFetchPath(path string) HandlerCallerOption {
 			c.csrfPath = path
 		}
 	}
+}
+
+// WithRetry401 controls the replay of a body-less call after a 401, like
+// btpingo.WithRetry401 (default true).
+func WithRetry401(retry bool) HandlerCallerOption {
+	return func(c *HandlerCaller) { c.noRetry = !retry }
 }
 
 // WithTransportFault installs a hook that runs on every request after
@@ -200,7 +207,7 @@ func (c *HandlerCaller) CallOnPremise(ctx context.Context, destName, method, pat
 	}
 	// Same retry decision as Service: one more attempt on 401 when the
 	// caller handed over no body.
-	if onprem.Retry401(resp.StatusCode, body) {
+	if !c.noRetry && onprem.Retry401(resp.StatusCode, body) {
 		_ = resp.Body.Close()
 		return c.callOnce(ctx, method, pathSuffix, headers, nil)
 	}

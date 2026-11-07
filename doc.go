@@ -87,6 +87,9 @@
 //   - [OnPremFailureDestinationNotFound], [OnPremFailureResponseTooLarge],
 //     [OnPremFailureTimeout], [OnPremFailureCanceled], [OnPremFailureTransport]
 //   - [ClassifyOnPremError] — (kind, detail) for huma 502 envelopes (err path)
+//   - [Origin401], [Origin401Kind] ([Origin401None], [Origin401OnPrem], [Origin401Proxy]) —
+//     where a 401 response came from (response path, heuristic)
+//   - [WithRetry401] — switch off the single replay after a 401
 //   - [OnPremNon2xxDetail] — stable detail string for the non-2xx-from-SAP path
 //
 // # Conservative retries
