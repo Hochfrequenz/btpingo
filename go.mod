@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	connectrpc.com/authn v0.2.0
 	connectrpc.com/connect v1.21.1
-	github.com/MicahParks/keyfunc/v3 v3.9.1
+	github.com/MicahParks/keyfunc/v3 v3.9.2
 	github.com/corbym/gocrest v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
